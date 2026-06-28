@@ -44,7 +44,9 @@ fn run() -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     write_checker_script(&checker_path, &project_root, &files)?;
-    run_godot_checker(&godot_exe, &project_root)
+    let result = run_godot_checker(&godot_exe, &project_root);
+    cleanup_checker_script(&checker_path);
+    result
 }
 
 fn resolve_godot(cli_override: Option<&Path>) -> Result<PathBuf> {
@@ -210,6 +212,16 @@ fn run_godot_checker(godot_exe: &Path, project_root: &Path) -> Result<()> {
         stdout,
         stderr
     ))
+}
+
+fn cleanup_checker_script(checker_path: &Path) {
+    let _ = fs::remove_file(checker_path);
+    if let Some(parent) = checker_path.parent() {
+        let _ = fs::remove_dir(parent);
+        if let Some(grandparent) = parent.parent() {
+            let _ = fs::remove_dir(grandparent);
+        }
+    }
 }
 
 #[cfg(test)]
