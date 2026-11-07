@@ -1,227 +1,600 @@
+//! Reports what Godot's GDScript compiler and resource files say is wrong with a
+//! project, without opening the editor or running the project's code.
+//!
+//! The analysis happens in `checker.gd`, inside a headless Godot. This program
+//! prepares that run and turns its results into stable output.
+
 use std::{
     collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, ExitCode, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, anyhow};
-use clap::Parser;
-use globwalk::GlobWalkerBuilder;
+use anyhow::{Context, Result, anyhow, bail};
+use clap::{Parser, ValueEnum};
+use serde::{Deserialize, Serialize};
+use walkdir::WalkDir;
 
-const CHECKER_REL_PATH: &str = ".gdtypecheck/state/typecheck_checker.gd";
+const CHECKER_SOURCE: &str = include_str!("checker.gd");
+const CLASS_CACHE: &str = ".godot/global_script_class_cache.cfg";
+const SCHEMA_VERSION: u32 = 1;
+const EXIT_PROBLEMS: u8 = 1;
+const EXIT_TOOL_FAILURE: u8 = 2;
+const MINIMUM_GODOT: (u32, u32) = (4, 5);
+/// Marks an override.cfg, or the part of one, that this tool wrote, so that one
+/// left behind by a killed run is cleaned up by the next.
+const OVERRIDE_MARKER: &str = "; gdtypecheck temporary settings, safe to delete";
+const UNSAFE_ACCESS_SETTINGS: [&str; 2] = [
+    "gdscript/warnings/unsafe_method_access",
+    "gdscript/warnings/unsafe_property_access",
+];
+
 #[derive(Debug, Parser)]
-#[command(name = "gdtypecheck", version, about = "Run a Godot-driven GDScript load/type check")]
+#[command(
+    name = "gdtypecheck",
+    version,
+    about = "Report GDScript compile errors and broken resource references in a Godot project",
+    after_help = "Exit codes: 0 no problems, 1 problems found, 2 the check could not run."
+)]
 struct Cli {
+    /// Godot project to check.
     #[arg(long, default_value = ".")]
     project_root: PathBuf,
+    /// Godot 4.5+ executable. Defaults to $GODOT_EXE, then godot on the PATH.
     #[arg(long)]
     godot_exe: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    format: Format,
+    /// Also fail on method and property accesses the compiler cannot verify,
+    /// such as a method that does not exist on a typed variable.
+    #[arg(long)]
+    strict: bool,
+    /// Do not report warnings.
+    #[arg(long, conflicts_with = "warnings_as_errors")]
+    no_warnings: bool,
+    /// Exit with 1 when there are warnings.
+    #[arg(long)]
+    warnings_as_errors: bool,
+    /// Seconds to wait for each Godot run.
+    #[arg(long, default_value_t = 300)]
+    timeout: u64,
+    /// Files or folders to check, relative to the project root.
     #[arg(value_name = "TARGET", default_value = ".")]
     targets: Vec<PathBuf>,
 }
 
-fn main() {
-    if let Err(error) = run() {
-        eprintln!("error: {error:#}");
-        std::process::exit(1);
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
+enum Format {
+    Text,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+enum Severity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+struct Diagnostic {
+    file: String,
+    line: u32,
+    severity: Severity,
+    rule: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PassResult {
+    files_checked: usize,
+    diagnostics: Vec<Diagnostic>,
+    warning_settings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct Report<'a> {
+    schema_version: u32,
+    tool_version: &'a str,
+    godot_version: &'a str,
+    ok: bool,
+    files_checked: usize,
+    errors: usize,
+    warnings: usize,
+    duration_ms: u128,
+    diagnostics: &'a [Diagnostic],
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match run(&cli) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::from(EXIT_PROBLEMS),
+        Err(error) => {
+            if cli.format == Format::Json {
+                let report = serde_json::json!({
+                    "schema_version": SCHEMA_VERSION,
+                    "tool_version": env!("CARGO_PKG_VERSION"),
+                    "ok": false,
+                    "tool_error": format!("{error:#}"),
+                });
+                println!("{report}");
+            } else {
+                eprintln!("gdtypecheck: error: {error:#}");
+            }
+            ExitCode::from(EXIT_TOOL_FAILURE)
+        }
     }
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
-    let project_root = fs::canonicalize(&cli.project_root)
-        .with_context(|| format!("invalid project root {}", cli.project_root.display()))?;
-    let godot_exe = resolve_godot(cli.godot_exe.as_deref())?;
-    let files = discover_gd_files(&project_root, &cli.targets)?;
-    if files.is_empty() {
-        return Err(anyhow!("no .gd files matched the provided targets"));
+/// Returns whether the project passed.
+fn run(cli: &Cli) -> Result<bool> {
+    let started = Instant::now();
+    let root = project_root(&cli.project_root)?;
+    let godot = resolve_godot(cli.godot_exe.as_deref())?;
+    let godot_version = godot_version(&godot)?;
+    let targets = resolve_targets(&root, &cli.targets)?;
+    let timeout = Duration::from_secs(cli.timeout);
+    remove_leftover_override(&root)?;
+    refresh_class_cache_if_stale(&godot, &root, timeout)?;
+
+    let workspace = Workspace::create()?;
+    let whole_project = targets == ["res://"];
+    let first = workspace.run_pass(&godot, &root, &targets, whole_project, "errors", timeout)?;
+    let mut diagnostics = first.diagnostics;
+
+    if cli.strict || !cli.no_warnings {
+        let mut settings = first.warning_settings;
+        settings.extend(UNSAFE_ACCESS_SETTINGS.map(String::from));
+        let override_file = OverrideFile::write(&root, &settings)?;
+        let second = workspace.run_pass(&godot, &root, &targets, false, "warnings", timeout);
+        override_file.restore()?;
+        let warnings = select_warnings(second?.diagnostics, cli);
+        // What the project already treats as an error shows up in both passes.
+        let is_new = |warning: &Diagnostic| {
+            !diagnostics
+                .iter()
+                .any(|error| error.file == warning.file && error.line == warning.line)
+        };
+        let warnings: Vec<Diagnostic> = warnings.into_iter().filter(is_new).collect();
+        diagnostics.extend(warnings);
     }
 
-    let checker_path = project_root.join(CHECKER_REL_PATH);
-    if let Some(parent) = checker_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+    for diagnostic in &mut diagnostics {
+        diagnostic.file = diagnostic
+            .file
+            .strip_prefix("res://")
+            .unwrap_or(&diagnostic.file)
+            .to_string();
     }
-    write_checker_script(&checker_path, &project_root, &files)?;
-    let result = run_godot_checker(&godot_exe, &project_root);
-    cleanup_checker_script(&checker_path);
-    result
+    diagnostics.sort();
+    diagnostics.dedup();
+
+    let errors = count(&diagnostics, Severity::Error);
+    let warnings = count(&diagnostics, Severity::Warning);
+    let ok = errors == 0 && (warnings == 0 || !cli.warnings_as_errors);
+    let report = Report {
+        schema_version: SCHEMA_VERSION,
+        tool_version: env!("CARGO_PKG_VERSION"),
+        godot_version: &godot_version,
+        ok,
+        files_checked: first.files_checked,
+        errors,
+        warnings,
+        duration_ms: started.elapsed().as_millis(),
+        diagnostics: &diagnostics,
+    };
+    match cli.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Format::Text => print_text(&report),
+    }
+    Ok(ok)
+}
+
+fn count(diagnostics: &[Diagnostic], severity: Severity) -> usize {
+    diagnostics
+        .iter()
+        .filter(|d| d.severity == severity)
+        .count()
+}
+
+/// Applies the command line's choices to what the warnings pass found.
+fn select_warnings(found: Vec<Diagnostic>, cli: &Cli) -> Vec<Diagnostic> {
+    found
+        .into_iter()
+        .filter_map(|mut diagnostic| {
+            if diagnostic.rule == "unsafe-access" {
+                if !cli.strict {
+                    return None;
+                }
+                diagnostic.severity = Severity::Error;
+            } else if cli.no_warnings {
+                return None;
+            }
+            Some(diagnostic)
+        })
+        .collect()
+}
+
+fn print_text(report: &Report) {
+    for d in report.diagnostics {
+        let severity = match d.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        };
+        if d.line > 0 {
+            println!(
+                "{}:{}: {severity}[{}]: {}",
+                d.file, d.line, d.rule, d.message
+            );
+        } else {
+            println!("{}: {severity}[{}]: {}", d.file, d.rule, d.message);
+        }
+    }
+    let files = report.files_checked;
+    if report.errors == 0 && report.warnings == 0 {
+        println!("gdtypecheck: ok ({files} scripts)");
+    } else {
+        println!(
+            "gdtypecheck: {} error(s), {} warning(s) ({files} scripts)",
+            report.errors, report.warnings
+        );
+    }
+}
+
+fn project_root(path: &Path) -> Result<PathBuf> {
+    let root = fs::canonicalize(path)
+        .with_context(|| format!("invalid project root {}", path.display()))?;
+    let root = without_verbatim_prefix(root);
+    if !root.join("project.godot").is_file() {
+        bail!(
+            "{} is not a Godot project: no project.godot",
+            root.display()
+        );
+    }
+    Ok(root)
+}
+
+/// Windows canonicalization yields `\\?\C:\...`, which is noise in messages.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+        Some(stripped) if !stripped.starts_with("UNC") => PathBuf::from(stripped),
+        _ => path,
+    }
 }
 
 fn resolve_godot(cli_override: Option<&Path>) -> Result<PathBuf> {
-    let mut candidates = Vec::new();
     if let Some(path) = cli_override {
-        candidates.push(path.to_path_buf());
+        return which::which(path)
+            .with_context(|| format!("Godot not found at {}", path.display()));
     }
-    if let Some(path) = env::var_os("GODOT_EXE") {
-        candidates.push(PathBuf::from(path));
+    if let Some(path) = env::var_os("GODOT_EXE").filter(|value| !value.is_empty()) {
+        return which::which(&path).with_context(|| {
+            format!(
+                "GODOT_EXE is not executable: {}",
+                PathBuf::from(&path).display()
+            )
+        });
     }
-    if let Ok(path) = which::which("godot") {
-        candidates.push(path);
-    }
-    if let Ok(path) = which::which("godot4") {
-        candidates.push(path);
-    }
-    candidates.push(PathBuf::from(r"C:\Program Files\Godot\Godot.exe"));
-    candidates.push(PathBuf::from(r"C:\Program Files\Godot_v4\Godot.exe"));
-
-    for candidate in candidates {
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-        if candidate.parent().is_none() {
-            if let Ok(resolved) = which::which(&candidate) {
-                return Ok(resolved);
-            }
+    for name in ["godot", "godot4", "Godot"] {
+        if let Ok(path) = which::which(name) {
+            return Ok(path);
         }
     }
-
+    for path in [
+        r"C:\Program Files\Godot\Godot.exe",
+        "/Applications/Godot.app/Contents/MacOS/Godot",
+    ] {
+        if Path::new(path).is_file() {
+            return Ok(PathBuf::from(path));
+        }
+    }
     Err(anyhow!(
-        "could not resolve Godot executable; set --godot-exe or GODOT_EXE"
+        "could not find Godot; pass --godot-exe or set GODOT_EXE"
     ))
 }
 
-fn discover_gd_files(project_root: &Path, targets: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let mut files = BTreeSet::new();
+fn godot_version(godot: &Path) -> Result<String> {
+    let output = Command::new(godot)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to run {}", godot.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let version = stdout
+        .lines()
+        .rev()
+        .find(|line| line.starts_with(|c: char| c.is_ascii_digit()))
+        .ok_or_else(|| anyhow!("{} did not report a Godot version", godot.display()))?
+        .trim()
+        .to_string();
+    if !is_supported(&version) {
+        bail!(
+            "Godot {version} is not supported: {}.{} or later is required",
+            MINIMUM_GODOT.0,
+            MINIMUM_GODOT.1
+        );
+    }
+    Ok(version)
+}
 
+fn is_supported(version: &str) -> bool {
+    let mut parts = version
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= MINIMUM_GODOT
+}
+
+/// Turns targets into `res://` paths. Checking the root means the whole project.
+fn resolve_targets(root: &Path, targets: &[PathBuf]) -> Result<Vec<String>> {
+    let mut resolved = BTreeSet::new();
     for target in targets {
-        let target = if target.is_absolute() {
+        let path = if target.is_absolute() {
             target.clone()
         } else {
-            project_root.join(target)
+            root.join(target)
         };
-        if target.is_file() {
-            if target.extension().and_then(|ext| ext.to_str()) == Some("gd") {
-                files.insert(canonical_relative(project_root, &target)?);
-            }
-            continue;
-        }
-
-        if target.is_dir() {
-            let relative_root = canonical_relative(project_root, &target)?;
-            let search_root = project_root.join(&relative_root);
-            let patterns = vec!["**/*.gd"];
-            let walker = GlobWalkerBuilder::from_patterns(&search_root, &patterns)
-                .follow_links(false)
-                .build()
-                .with_context(|| format!("failed to walk {}", search_root.display()))?;
-            for entry in walker.filter_map(Result::ok) {
-                let path = entry.path();
-                if is_excluded(project_root, path) {
-                    continue;
-                }
-                files.insert(canonical_relative(project_root, path)?);
-            }
-            continue;
-        }
-
-        return Err(anyhow!("target does not exist: {}", target.display()));
+        let path = fs::canonicalize(&path)
+            .with_context(|| format!("target does not exist: {}", target.display()))?;
+        let relative = without_verbatim_prefix(path)
+            .strip_prefix(root)
+            .map_err(|_| anyhow!("target is outside the project: {}", target.display()))?
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        resolved.insert(format!("res://{relative}"));
     }
-
-    Ok(files.into_iter().collect())
+    if resolved.contains("res://") {
+        return Ok(vec!["res://".to_string()]);
+    }
+    Ok(resolved.into_iter().collect())
 }
 
-fn canonical_relative(project_root: &Path, path: &Path) -> Result<PathBuf> {
-    let absolute = fs::canonicalize(path)
-        .with_context(|| format!("failed to resolve {}", path.display()))?;
-    absolute
-        .strip_prefix(project_root)
-        .map(Path::to_path_buf)
-        .map_err(|_| {
-            anyhow!(
-                "path {} is outside project root {}",
-                absolute.display(),
-                project_root.display()
-            )
+/// Scripts Godot would see: no hidden folders, `.gdignore`d folders or nested projects.
+fn project_scripts(root: &Path) -> impl Iterator<Item = PathBuf> {
+    let root = root.to_path_buf();
+    WalkDir::new(&root)
+        .into_iter()
+        .filter_entry(move |entry| {
+            let path = entry.path();
+            if path == root || !entry.file_type().is_dir() {
+                return true;
+            }
+            !entry.file_name().to_string_lossy().starts_with('.')
+                && !path.join(".gdignore").exists()
+                && !path.join("project.godot").exists()
         })
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "gd"))
 }
 
-fn is_excluded(project_root: &Path, path: &Path) -> bool {
-    let Ok(relative) = path.strip_prefix(project_root) else {
-        return true;
-    };
-    let normalized = relative.display().to_string().replace('\\', "/");
-    normalized.starts_with("addons/")
-        || normalized.starts_with(".godot/")
-        || normalized.starts_with("reports/")
-        || normalized.starts_with(".gdsuite/")
-        || normalized.starts_with(".gdtypecheck/")
-}
-
-fn write_checker_script(checker_path: &Path, project_root: &Path, files: &[PathBuf]) -> Result<()> {
-    let mut lines = vec![
-        "extends SceneTree".to_string(),
-        String::new(),
-        "func _init():".to_string(),
-        "\tvar files = [".to_string(),
-    ];
-    for file in files {
-        let normalized = file.display().to_string().replace('\\', "/");
-        lines.push(format!("\t\t\"res://{normalized}\","));
-    }
-    lines.extend([
-        "\t]".to_string(),
-        "\tvar errors = []".to_string(),
-        "\tfor file_path in files:".to_string(),
-        "\t\tif load(file_path) == null:".to_string(),
-        "\t\t\terrors.append(file_path)".to_string(),
-        "\tif errors.size() > 0:".to_string(),
-        "\t\tfor file_path in errors:".to_string(),
-        "\t\t\tprinterr(file_path)".to_string(),
-        "\t\tquit(1)".to_string(),
-        "\tprint(\"gdtypecheck: ok\")".to_string(),
-        "\tquit(0)".to_string(),
-    ]);
-
-    fs::write(checker_path, lines.join("\n") + "\n").with_context(|| {
-        format!(
-            "failed to write checker script {} inside {}",
-            checker_path.display(),
-            project_root.display()
-        )
-    })
-}
-
-fn run_godot_checker(godot_exe: &Path, project_root: &Path) -> Result<()> {
-    let output = Command::new(godot_exe)
-        .args([
-            "--headless",
-            "--path",
-            &project_root.display().to_string(),
-            "--script",
-            &format!("res://{}", CHECKER_REL_PATH.replace('\\', "/")),
-        ])
-        .current_dir(project_root)
-        .output()
-        .with_context(|| format!("failed to execute {}", godot_exe.display()))?;
-
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if !stdout.trim().is_empty() {
-            print!("{stdout}");
-        }
+/// Godot resolves `class_name`s through a cache that only an import updates. On a
+/// fresh checkout or after adding a class, valid code would otherwise fail.
+fn refresh_class_cache_if_stale(godot: &Path, root: &Path, timeout: Duration) -> Result<()> {
+    let declared: BTreeSet<String> = project_scripts(root)
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .filter_map(|source| declared_class(&source))
+        .collect();
+    let cache = fs::read_to_string(root.join(CLASS_CACHE)).ok();
+    if cache
+        .as_deref()
+        .is_some_and(|cache| !class_cache_is_stale(cache, &declared, root))
+    {
         return Ok(());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(anyhow!(
-        "typecheck failed with exit code {:?}\nstdout:\n{}\nstderr:\n{}",
-        output.status.code(),
-        stdout,
-        stderr
-    ))
+    let status = run_with_timeout(
+        Command::new(godot)
+            .args(["--headless", "--path"])
+            .arg(root)
+            .arg("--import")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+        timeout,
+    );
+    // Godot can crash on exit after a successful import, so the exit code says
+    // nothing. What matters is whether the cache is there now.
+    status.context("failed to run the Godot import")?;
+    if !declared.is_empty() && !root.join(CLASS_CACHE).is_file() {
+        bail!("the Godot import did not produce {CLASS_CACHE}");
+    }
+    Ok(())
 }
 
-fn cleanup_checker_script(checker_path: &Path) {
-    let _ = fs::remove_file(checker_path);
-    if let Some(parent) = checker_path.parent() {
-        let _ = fs::remove_dir(parent);
-        if let Some(grandparent) = parent.parent() {
-            let _ = fs::remove_dir(grandparent);
+fn declared_class(source: &str) -> Option<String> {
+    source.lines().find_map(|line| {
+        let line = line.trim_start();
+        let line = line.strip_prefix("@tool").map_or(line, str::trim_start);
+        let name = line.strip_prefix("class_name")?;
+        if !name.starts_with([' ', '\t']) {
+            return None;
+        }
+        let name: String = name
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        (!name.is_empty()).then_some(name)
+    })
+}
+
+fn class_cache_is_stale(cache: &str, declared: &BTreeSet<String>, root: &Path) -> bool {
+    let cached_classes = quoted_values(cache, "\"class\": &\"");
+    let has_undeclared = declared.iter().any(|class| !cached_classes.contains(class));
+    let has_moved = quoted_values(cache, "\"path\": \"").iter().any(|path| {
+        path.strip_prefix("res://")
+            .is_some_and(|relative| !root.join(relative).exists())
+    });
+    has_undeclared || has_moved
+}
+
+fn quoted_values(text: &str, prefix: &str) -> BTreeSet<String> {
+    text.split(prefix)
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .map(String::from)
+        .collect()
+}
+
+/// Runs Godot with its output sent to a file: Godot 4.6 can crash on Windows when
+/// its stderr is a pipe, and the results come through a file anyway.
+fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<()> {
+    let mut child = command.spawn().context("failed to start Godot")?;
+    let started = Instant::now();
+    while child.try_wait()?.is_none() {
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Godot did not finish within {} seconds", timeout.as_secs());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+/// The temporary folder holding the checker and what it exchanges with this program.
+struct Workspace {
+    dir: PathBuf,
+    checker: PathBuf,
+}
+
+impl Workspace {
+    fn create() -> Result<Self> {
+        let dir = env::temp_dir().join(format!("gdtypecheck-{}", std::process::id()));
+        fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+        let checker = dir.join("checker.gd");
+        fs::write(&checker, CHECKER_SOURCE)?;
+        Ok(Self { dir, checker })
+    }
+
+    fn run_pass(
+        &self,
+        godot: &Path,
+        root: &Path,
+        targets: &[String],
+        whole_project: bool,
+        pass: &str,
+        timeout: Duration,
+    ) -> Result<PassResult> {
+        let result_path = self.dir.join(format!("{pass}.json"));
+        let log_path = self.dir.join(format!("{pass}.log"));
+        let request_path = self.dir.join(format!("{pass}.request.json"));
+        let request = serde_json::json!({
+            "targets": targets,
+            "pass": pass,
+            "whole_project": whole_project,
+            "output": slash_path(&result_path),
+        });
+        fs::write(&request_path, request.to_string())?;
+
+        let log = fs::File::create(&log_path)?;
+        run_with_timeout(
+            Command::new(godot)
+                .args(["--headless", "--path"])
+                .arg(root)
+                .arg("--script")
+                .arg(slash_path(&self.checker))
+                .arg("--")
+                .arg(slash_path(&request_path))
+                .stdin(Stdio::null())
+                .stdout(log.try_clone()?)
+                .stderr(log),
+            timeout,
+        )?;
+
+        // The checker kills its own process once done, so only the result counts.
+        let text = fs::read_to_string(&result_path).map_err(|_| {
+            let log = fs::read_to_string(&log_path).unwrap_or_default();
+            let tail: Vec<&str> = log.lines().rev().take(15).collect();
+            let tail: Vec<&str> = tail.into_iter().rev().collect();
+            anyhow!(
+                "Godot exited without producing results:\n{}",
+                tail.join("\n")
+            )
+        })?;
+        serde_json::from_str(&text).context("the checker produced invalid results")
+    }
+}
+
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn slash_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
+/// A temporary override.cfg, the only way to change warning levels before Godot
+/// reads them. Restored on drop so that an error cannot leave it behind.
+struct OverrideFile {
+    path: PathBuf,
+    original: Option<String>,
+    restored: bool,
+}
+
+impl OverrideFile {
+    fn write(root: &Path, warning_settings: &[String]) -> Result<Self> {
+        let path = root.join("override.cfg");
+        let original = fs::read_to_string(&path).ok();
+        let mut contents = original.clone().unwrap_or_default();
+        contents.push_str(&format!("\n{OVERRIDE_MARKER}\n[debug]\n"));
+        for setting in warning_settings {
+            contents.push_str(&format!("{setting}=2\n"));
+        }
+        fs::write(&path, contents)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(Self {
+            path,
+            original,
+            restored: false,
+        })
+    }
+
+    fn restore(mut self) -> Result<()> {
+        self.restored = true;
+        self.put_back()
+    }
+
+    fn put_back(&self) -> Result<()> {
+        match &self.original {
+            Some(original) => fs::write(&self.path, original)?,
+            None => fs::remove_file(&self.path)?,
+        }
+        Ok(())
+    }
+}
+
+impl Drop for OverrideFile {
+    fn drop(&mut self) {
+        if !self.restored {
+            let _ = self.put_back();
         }
     }
+}
+
+fn remove_leftover_override(root: &Path) -> Result<()> {
+    let path = root.join("override.cfg");
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let Some(position) = contents.find(OVERRIDE_MARKER) else {
+        return Ok(());
+    };
+    let original = contents[..position].trim_end();
+    if original.is_empty() {
+        fs::remove_file(&path)?;
+    } else {
+        fs::write(&path, format!("{original}\n"))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -229,25 +602,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn excludes_suite_and_vendor_dirs() {
-        assert!(is_excluded(Path::new("C:/repo"), Path::new("C:/repo/addons/foo.gd")));
-        assert!(is_excluded(Path::new("C:/repo"), Path::new("C:/repo/.gdsuite/state/x.gd")));
-        assert!(!is_excluded(Path::new("C:/repo"), Path::new("C:/repo/client/foo.gd")));
+    fn reads_declared_classes() {
+        assert_eq!(
+            declared_class("class_name Foo\nextends Node"),
+            Some("Foo".into())
+        );
+        assert_eq!(
+            declared_class("@tool\nclass_name Foo_2 extends Node"),
+            Some("Foo_2".into())
+        );
+        assert_eq!(declared_class("@tool class_name Foo"), Some("Foo".into()));
+        assert_eq!(declared_class("extends Node\nvar class_name_x = 1"), None);
     }
 
     #[test]
-    fn checker_script_uses_res_paths() {
-        let script_root = PathBuf::from("C:/repo");
-        let temp = tempfile_dir();
-        let checker = temp.join("typecheck_checker.gd");
-        write_checker_script(&checker, &script_root, &[PathBuf::from("client/foo.gd")]).unwrap();
-        let body = fs::read_to_string(checker).unwrap();
-        assert!(body.contains("\"res://client/foo.gd\""));
+    fn minimum_version_is_enforced() {
+        assert!(is_supported("4.5.stable.official.abc"));
+        assert!(is_supported("4.7.stable"));
+        assert!(is_supported("5.0.stable"));
+        assert!(!is_supported("4.4.1.stable"));
+        assert!(!is_supported("3.6.stable"));
     }
 
-    fn tempfile_dir() -> PathBuf {
-        let path = env::temp_dir().join("gdtypecheck-tests");
-        let _ = fs::create_dir_all(&path);
-        path
+    #[test]
+    fn stale_cache_detection() {
+        let cache = r#"list=[{ "base": &"Node", "class": &"Foo", "icon": "", "language": &"GDScript", "path": "res://definitely/not/here.gd" }]"#;
+        assert_eq!(
+            quoted_values(cache, "\"class\": &\""),
+            BTreeSet::from(["Foo".to_string()])
+        );
+        let root = env::temp_dir();
+        let declared = BTreeSet::from(["Foo".to_string()]);
+        assert!(
+            class_cache_is_stale(cache, &declared, &root),
+            "a cached file has moved"
+        );
+        assert!(
+            class_cache_is_stale("", &declared, &root),
+            "a class is not cached"
+        );
+        assert!(!class_cache_is_stale("", &BTreeSet::new(), &root));
     }
 }

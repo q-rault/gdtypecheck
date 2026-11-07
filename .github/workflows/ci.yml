@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main, 'release-*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Godot ${{ matrix.godot }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        godot: ['4.7']
+        include:
+          - os: ubuntu-latest
+            godot: '4.6.2'
+          - os: ubuntu-latest
+            godot: '4.5.1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install Godot
+        shell: bash
+        run: |
+          base="https://github.com/godotengine/godot-builds/releases/download/${{ matrix.godot }}-stable"
+          name="Godot_v${{ matrix.godot }}-stable"
+          mkdir -p "$RUNNER_TEMP/godot"
+          case "$RUNNER_OS" in
+            Linux)
+              curl -fsSL -o godot.zip "$base/${name}_linux.x86_64.zip"
+              unzip -q godot.zip -d "$RUNNER_TEMP/godot"
+              exe="$RUNNER_TEMP/godot/${name}_linux.x86_64" ;;
+            Windows)
+              curl -fsSL -o godot.zip "$base/${name}_win64.exe.zip"
+              unzip -q godot.zip -d "$RUNNER_TEMP/godot"
+              exe="$RUNNER_TEMP/godot/${name}_win64_console.exe" ;;
+            macOS)
+              curl -fsSL -o godot.zip "$base/${name}_macos.universal.zip"
+              unzip -q godot.zip -d "$RUNNER_TEMP/godot"
+              exe="$RUNNER_TEMP/godot/Godot.app/Contents/MacOS/Godot" ;;
+          esac
+          chmod +x "$exe" || true
+          echo "GODOT_EXE=$exe" >> "$GITHUB_ENV"
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - run: cargo package --locked
