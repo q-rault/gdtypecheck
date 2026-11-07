@@ -1,6 +1,6 @@
 # gdtypecheck
 
-Reports what is wrong with a Godot project without opening the editor or running the game: GDScript compile errors, including type errors, and references to files that no longer exist. It is meant for CI and coding agents, which can't see the editor's error underlines.
+Reports what is wrong with a Godot project without opening the editor or running the game: GDScript compile errors, including type errors, shader compile errors, and references to files that no longer exist. It is meant for CI and coding agents, which can't see the editor's error underlines.
 
 ```console
 $ gdtypecheck
@@ -26,6 +26,7 @@ gdtypecheck                     # the whole project
 gdtypecheck player/ ui/hud.gd   # only these files and folders
 gdtypecheck --strict            # also check members of your own classes
 gdtypecheck --format json       # for tools and agents
+gdtypecheck --format sarif      # for GitHub code scanning
 ```
 
 | Exit code | Meaning |
@@ -39,18 +40,20 @@ gdtypecheck --format json       # for tools and agents
 | Rule | What it finds | When |
 | --- | --- | --- |
 | `gdscript` | Parse and type errors, wrong arguments, unknown names and types, missing `preload`s | Always |
-| `missing-resource` | Scenes and resources that reference missing files, broken autoloads and main scene, `load("res://...")` and `change_scene_to_file("res://...")` of missing files | Always |
+| `shader` | Compile errors in `.gdshader` files and the files they include | Always |
+| `missing-resource` | Scenes and resources that reference missing files, broken autoloads and main scene, `load("res://...")` and `change_scene_to_file("res://...")` of missing files, missing shader includes | Always |
 | `gdscript-warning` | The warnings your project settings set to "warn" | Unless `--no-warnings` |
 | `unsafe-access` | Methods and properties that don't exist on one of your own classes | With `--strict` |
 
 ## How it works, and what it can't see
 
-It loads your scripts in a headless Godot and collects what Godot's own compiler reports, so the type analysis is Godot's and matches the editor. That has limits:
+It loads your scripts and shaders in a headless Godot and collects what Godot's own compilers report, so the analysis is Godot's and matches the editor. That has limits:
 
 - **Only typed code is checked.** `var p = Player.new()` is unchecked; `var p := Player.new()` is. A typed project gets more out of this tool.
 - **`--strict` covers your classes only.** A method missing from `Node` or `Variant` is usually normal dynamic GDScript, so those aren't reported. A property that only a subclass declares is reported, even though it can work at runtime.
 - **Literal paths only.** A `load()` of a path built at runtime isn't checked.
 - **Node paths aren't checked.** `$Missing` and `get_node("Missing")` are not compared with your scenes.
+- **Standalone shader files only.** Shader code embedded in a scene, and visual shaders, aren't checked.
 - **It finds errors, not bugs.** Whether the code does the right thing is what tests are for.
 
 ## Effects on your project

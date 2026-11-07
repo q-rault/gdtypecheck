@@ -257,6 +257,64 @@ fn a_moved_file_whose_uid_still_resolves_is_not_a_broken_reference() {
 }
 
 #[test]
+fn every_kind_of_valid_shader_passes() {
+    let p = project!();
+    p.write("canvas.gdshader", "shader_type canvas_item;\nuniform vec4 tint = vec4(1.0);\nvoid fragment() { COLOR = tint; }\n");
+    p.write(
+        "spatial.gdshader",
+        "shader_type spatial;\nrender_mode unshaded;\nvoid fragment() { ALBEDO = vec3(1.0); }\n",
+    );
+    p.write(
+        "particles.gdshader",
+        "shader_type particles;\nvoid process() { VELOCITY = vec3(1.0); }\n",
+    );
+    p.write(
+        "sky.gdshader",
+        "shader_type sky;\nvoid sky() { COLOR = vec3(1.0); }\n",
+    );
+    p.write(
+        "fog.gdshader",
+        "shader_type fog;\nvoid fog() { DENSITY = 1.0; }\n",
+    );
+    p.write("lib/helper.gdshaderinc", "float helper() { return 1.0; }\n");
+    p.write("lib/uses.gdshader", "shader_type canvas_item;\n#include \"helper.gdshaderinc\"\nvoid fragment() { COLOR = vec4(helper()); }\n");
+    assert_clean(&p.run(&[]));
+}
+
+#[test]
+fn shader_errors_are_reported_with_their_location() {
+    let p = project!();
+    p.write(
+        "bad.gdshader",
+        "shader_type canvas_item;\n\nvoid fragment() {\n\tCOLOR = vec2(1.0);\n}\n",
+    );
+    p.write("bad.gdshaderinc", "float helper() { return nope; }\n");
+    p.write("uses.gdshader", "shader_type canvas_item;\n#include \"res://bad.gdshaderinc\"\nvoid fragment() { COLOR = vec4(helper()); }\n");
+    p.write("gone.gdshader", "shader_type canvas_item;\n#include \"res://gone.gdshaderinc\"\nvoid fragment() { COLOR = vec4(1.0); }\n");
+    let run = p.run(&[]);
+    assert_reports(&run, "bad.gdshader:4: error[shader]");
+    assert_reports(&run, "bad.gdshaderinc:1: error[shader]");
+    assert_reports(&run, "gone.gdshader:2: error[missing-resource]");
+    assert!(!run.stdout.contains("Unknown character"), "{}", run.stdout);
+}
+
+#[test]
+fn a_shader_error_is_reported_once_when_a_script_preloads_it() {
+    let p = project!();
+    p.write(
+        "bad.gdshader",
+        "shader_type canvas_item;\nvoid fragment() { COLOR = vec2(1.0); }\n",
+    );
+    p.write(
+        "user.gd",
+        "extends Node\nconst S = preload(\"res://bad.gdshader\")\n",
+    );
+    let run = p.run(&[]);
+    assert_reports(&run, "bad.gdshader:2: error[shader]");
+    assert_eq!(run.stdout.matches("error[").count(), 1, "{}", run.stdout);
+}
+
+#[test]
 fn autoloads_are_understood_but_never_run() {
     let p = project!();
     p.append_settings("[autoload]\nBoot=\"*res://boot.gd\"\n");
@@ -410,6 +468,59 @@ fn json_output_is_structured() {
     assert_eq!(diagnostic["line"], 3);
     assert_eq!(diagnostic["severity"], "error");
     assert_eq!(diagnostic["rule"], "gdscript");
+}
+
+#[test]
+fn sarif_output_locates_every_finding() {
+    let p = project!();
+    p.write(
+        "sub/bad.gd",
+        "extends Node\nfunc f() -> int:\n\treturn \"x\"\n",
+    );
+    p.write(
+        "broken.tscn",
+        "[gd_scene load_steps=2 format=3]\n\n[ext_resource type=\"Script\" path=\"res://gone.gd\" id=\"1\"]\n\n[node name=\"Root\" type=\"Node\"]\nscript = ExtResource(\"1\")\n",
+    );
+    let run = p.run(&["--format", "sarif"]);
+    assert_eq!(run.code, 1);
+    let log: serde_json::Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(log["version"], "2.1.0");
+    let tool_run = &log["runs"][0];
+    assert_eq!(tool_run["tool"]["driver"]["name"], "gdtypecheck");
+    let results = tool_run["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+
+    let in_scene = &results[0]["locations"][0]["physicalLocation"];
+    assert_eq!(results[0]["ruleId"], "missing-resource");
+    assert_eq!(in_scene["artifactLocation"]["uri"], "broken.tscn");
+    assert!(
+        in_scene.get("region").is_none(),
+        "a file-level finding has no line"
+    );
+
+    let in_script = &results[1]["locations"][0]["physicalLocation"];
+    assert_eq!(results[1]["level"], "error");
+    assert_eq!(in_script["artifactLocation"]["uri"], "sub/bad.gd");
+    assert_eq!(in_script["artifactLocation"]["uriBaseId"], "PROJECTROOT");
+    assert_eq!(in_script["region"]["startLine"], 3);
+
+    let rules = tool_run["tool"]["driver"]["rules"].as_array().unwrap();
+    for result in results {
+        assert!(
+            rules.iter().any(|rule| rule["id"] == result["ruleId"]),
+            "{result}"
+        );
+    }
+}
+
+#[test]
+fn clean_sarif_output_has_no_results() {
+    let p = project!();
+    p.write("ok.gd", "extends Node\n");
+    let run = p.run(&["--format", "sarif"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let log: serde_json::Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(log["runs"][0]["results"].as_array().unwrap().len(), 0);
 }
 
 #[test]

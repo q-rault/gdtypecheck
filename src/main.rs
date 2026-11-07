@@ -36,7 +36,7 @@ const UNSAFE_ACCESS_SETTINGS: [&str; 2] = [
 #[command(
     name = "gdtypecheck",
     version,
-    about = "Report GDScript compile errors and broken resource references in a Godot project",
+    about = "Report GDScript and shader compile errors and broken references in a Godot project",
     after_help = "Exit codes: 0 no problems, 1 problems found, 2 the check could not run."
 )]
 struct Cli {
@@ -70,6 +70,8 @@ struct Cli {
 enum Format {
     Text,
     Json,
+    /// SARIF 2.1.0, for GitHub code scanning and similar tools.
+    Sarif,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -189,6 +191,7 @@ fn run(cli: &Cli) -> Result<bool> {
     };
     match cli.format {
         Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Format::Sarif => println!("{}", serde_json::to_string_pretty(&sarif_log(&report))?),
         Format::Text => print_text(&report),
     }
     Ok(ok)
@@ -217,6 +220,63 @@ fn select_warnings(found: Vec<Diagnostic>, cli: &Cli) -> Vec<Diagnostic> {
             Some(diagnostic)
         })
         .collect()
+}
+
+/// One rule per kind of finding, so that code scanning can group them.
+const SARIF_RULES: [(&str, &str); 5] = [
+    ("gdscript", "GDScript compile error"),
+    ("shader", "Shader compile error"),
+    (
+        "missing-resource",
+        "Reference to a file that does not exist",
+    ),
+    ("gdscript-warning", "GDScript warning"),
+    ("unsafe-access", "Unknown member of a project class"),
+];
+
+fn sarif_log(report: &Report) -> serde_json::Value {
+    let rules: Vec<serde_json::Value> = SARIF_RULES
+        .iter()
+        .map(|(id, description)| {
+            serde_json::json!({ "id": id, "shortDescription": { "text": description } })
+        })
+        .collect();
+    let results: Vec<serde_json::Value> = report.diagnostics.iter().map(sarif_result).collect();
+    serde_json::json!({
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "gdtypecheck",
+                    "version": report.tool_version,
+                    "informationUri": env!("CARGO_PKG_REPOSITORY"),
+                    "rules": rules,
+                }
+            },
+            "originalUriBaseIds": { "PROJECTROOT": { "description": { "text": "The Godot project root" } } },
+            "results": results,
+        }]
+    })
+}
+
+fn sarif_result(diagnostic: &Diagnostic) -> serde_json::Value {
+    let mut location = serde_json::json!({
+        "artifactLocation": { "uri": diagnostic.file, "uriBaseId": "PROJECTROOT" }
+    });
+    if diagnostic.line > 0 {
+        location["region"] = serde_json::json!({ "startLine": diagnostic.line });
+    }
+    let level = match diagnostic.severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+    };
+    serde_json::json!({
+        "ruleId": diagnostic.rule,
+        "level": level,
+        "message": { "text": diagnostic.message },
+        "locations": [{ "physicalLocation": location }],
+    })
 }
 
 fn print_text(report: &Report) {

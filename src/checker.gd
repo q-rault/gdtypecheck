@@ -38,10 +38,15 @@ class ErrorCollector extends Logger:
 		error_type: int,
 		_script_backtrace: Array[ScriptBacktrace]
 	) -> void:
-		if error_type != ERROR_TYPE_SCRIPT:
+		if error_type != ERROR_TYPE_SCRIPT and error_type != ERROR_TYPE_SHADER:
 			return
 		_mutex.lock()
-		entries.append({"file": file, "line": line, "message": rationale if rationale != "" else code})
+		entries.append({
+			"file": file,
+			"line": line,
+			"message": rationale if rationale != "" else code,
+			"is_shader": error_type == ERROR_TYPE_SHADER,
+		})
 		_mutex.unlock()
 
 
@@ -55,13 +60,17 @@ func _init() -> void:
 
 	var scripts: Array[String] = []
 	var resources: Array[String] = []
+	var shaders: Array[String] = []
 	for target: String in request["targets"]:
-		_collect_files(target, scripts, resources)
+		_collect_files(target, scripts, resources, shaders)
 
 	var report_warnings: bool = request["pass"] == "warnings"
 
 	var collector: ErrorCollector = ErrorCollector.new()
 	OS.add_logger(collector)
+	if not report_warnings:
+		# Before the scripts: a shader they preload would compile only once.
+		_check_shaders(shaders, collector)
 	var unloadable: Array[String] = _load_scripts(scripts)
 	OS.remove_logger(collector)
 	_report_script_errors(collector.entries, unloadable, report_warnings)
@@ -83,12 +92,14 @@ func _init() -> void:
 	var _killed: Variant = OS.kill(OS.get_process_id())
 
 
-func _collect_files(target: String, scripts: Array[String], resources: Array[String]) -> void:
+func _collect_files(target: String, scripts: Array[String], resources: Array[String], shaders: Array[String]) -> void:
 	if FileAccess.file_exists(target):
 		if target.get_extension() == "gd":
 			scripts.append(target)
 		elif target.get_extension() in RESOURCE_EXTENSIONS:
 			resources.append(target)
+		elif target.get_extension() == "gdshader":
+			shaders.append(target)
 		return
 	for dir_name: String in DirAccess.get_directories_at(target):
 		var path: String = target.path_join(dir_name)
@@ -97,9 +108,9 @@ func _collect_files(target: String, scripts: Array[String], resources: Array[Str
 		# Like the editor, treat a folder with its own project.godot as another project.
 		if not FileAccess.file_exists(path.path_join(".gdignore")) \
 				and not FileAccess.file_exists(path.path_join("project.godot")):
-			_collect_files(path, scripts, resources)
+			_collect_files(path, scripts, resources, shaders)
 	for file_name: String in DirAccess.get_files_at(target):
-		_collect_files(target.path_join(file_name), scripts, resources)
+		_collect_files(target.path_join(file_name), scripts, resources, shaders)
 
 
 # The warnings set to "warn". Godot only reports warnings outside the editor when
@@ -116,6 +127,44 @@ func _warning_settings() -> Array[String]:
 	return settings
 
 
+# Shaders compile on first use, even with the dummy renderer of a headless run.
+# Godot reports errors in the shader itself without a file, and errors in an
+# included file with that file's path.
+func _check_shaders(shaders: Array[String], collector: ErrorCollector) -> void:
+	for path: String in shaders:
+		if _has_missing_include(path):
+			continue
+		var shader: Shader = load(path) as Shader
+		if shader == null:
+			_add(path, 0, "error", "shader", "the shader could not be loaded")
+			continue
+		var _uniforms: Variant = shader.get_shader_uniform_list()
+		for entry: Dictionary in collector.entries:
+			if entry["is_shader"]:
+				var file: String = entry["file"]
+				var line: int = entry["line"]
+				var message: String = entry["message"]
+				_add(file if file != "" else path, line, "error", "shader", message)
+		collector.entries.clear()
+
+
+# Godot reports a missing include as an unknown character at the "#", so it is
+# looked for first to report the actual cause.
+func _has_missing_include(path: String) -> bool:
+	var pattern: RegEx = RegEx.create_from_string("^\\s*#include\\s+\"([^\"]+)\"")
+	var lines: PackedStringArray = FileAccess.get_file_as_string(path).split("\n")
+	var is_missing: bool = false
+	for index: int in lines.size():
+		var found: RegExMatch = pattern.search(lines[index])
+		if found != null:
+			var include: String = found.get_string(1)
+			var resolved: String = include if include.begins_with("res://") else path.get_base_dir().path_join(include)
+			if not _resource_exists(resolved):
+				_add(path, index + 1, "error", "missing-resource", "\"%s\" does not exist" % include)
+				is_missing = true
+	return is_missing
+
+
 func _load_scripts(scripts: Array[String]) -> Array[String]:
 	var unloadable: Array[String] = []
 	for path: String in scripts:
@@ -129,6 +178,8 @@ func _report_script_errors(entries: Array[Dictionary], unloadable: Array[String]
 	var autoloads: Dictionary = _autoload_names()
 	var explained: Dictionary = {}
 	for entry: Dictionary in entries:
+		if entry["is_shader"]:
+			continue
 		var message: String = entry["message"]
 		var file: String = entry["file"]
 		var line: int = entry["line"]
