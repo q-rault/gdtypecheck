@@ -1,58 +1,5 @@
 extends SceneTree
 
-# A project's warning settings apply to this script too, and it has to compile
-# under the strictest of them.
-@warning_ignore_start(
-	"unassigned_variable",
-	"unassigned_variable_op_assign",
-	"unused_variable",
-	"unused_local_constant",
-	"unused_private_class_variable",
-	"unused_parameter",
-	"unused_signal",
-	"shadowed_variable",
-	"shadowed_variable_base_class",
-	"shadowed_global_identifier",
-	"unreachable_code",
-	"unreachable_pattern",
-	"standalone_expression",
-	"standalone_ternary",
-	"incompatible_ternary",
-	"untyped_declaration",
-	"inferred_declaration",
-	"unsafe_property_access",
-	"unsafe_method_access",
-	"unsafe_cast",
-	"unsafe_call_argument",
-	"unsafe_void_return",
-	"return_value_discarded",
-	"static_called_on_instance",
-	"missing_tool",
-	"redundant_static_unload",
-	"redundant_await",
-	"missing_await",
-	"assert_always_true",
-	"assert_always_false",
-	"integer_division",
-	"narrowing_conversion",
-	"int_as_enum_without_cast",
-	"int_as_enum_without_match",
-	"enum_variable_without_default",
-	"empty_file",
-	"deprecated_keyword",
-	"confusable_identifier",
-	"confusable_local_declaration",
-	"confusable_local_usage",
-	"confusable_capture_reassignment",
-	"inference_on_variant",
-	"native_method_override",
-	"get_node_default_without_onready",
-	"onready_with_export",
-	"property_used_as_function",
-	"constant_used_as_function",
-	"function_used_as_property",
-)
-
 # Loads a project's scripts in a headless Godot and reports what the GDScript
 # compiler and the project's resource files say is wrong. See README.md.
 #
@@ -64,17 +11,21 @@ extends SceneTree
 # the process is then killed so that they are never created. That keeps the
 # project's own code from running during a check. Static variable initializers
 # of the loaded scripts are the one exception, as they run when a script loads.
+#
+# A project's warning settings apply to this script too, so everything is typed
+# explicitly: it has to compile under the strictest of them. The list of warnings
+# differs between Godot versions, which rules out @warning_ignore.
 
-const WARNINGS_PREFIX := "debug/gdscript/warnings/"
-const WARNING_SUFFIX := " (Warning treated as error.)"
-const LEVEL_WARN := 1
-const SKIPPED_ROOT_DIRS := ["addons"]
-const RESOURCE_EXTENSIONS := ["tscn", "tres", "scn", "res"]
-const UNSAFE_MARKER := "may be present on a subtype"
+const WARNINGS_PREFIX: String = "debug/gdscript/warnings/"
+const WARNING_SUFFIX: String = " (Warning treated as error.)"
+const LEVEL_WARN: int = 1
+const SKIPPED_ROOT_DIRS: Array[String] = ["addons"]
+const RESOURCE_EXTENSIONS: Array[String] = ["tscn", "tres", "scn", "res"]
+const UNSAFE_MARKER: String = "may be present on a subtype"
 
 
 class ErrorCollector extends Logger:
-	var _mutex := Mutex.new()
+	var _mutex: Mutex = Mutex.new()
 	var entries: Array[Dictionary] = []
 
 	func _log_error(
@@ -95,7 +46,7 @@ class ErrorCollector extends Logger:
 
 
 var _diagnostics: Array[Dictionary] = []
-var _seen := {}
+var _seen: Dictionary = {}
 
 
 func _init() -> void:
@@ -109,9 +60,9 @@ func _init() -> void:
 
 	var report_warnings: bool = request["pass"] == "warnings"
 
-	var collector := ErrorCollector.new()
+	var collector: ErrorCollector = ErrorCollector.new()
 	OS.add_logger(collector)
-	var unloadable := _load_scripts(scripts)
+	var unloadable: Array[String] = _load_scripts(scripts)
 	OS.remove_logger(collector)
 	_report_script_errors(collector.entries, unloadable, report_warnings)
 
@@ -121,14 +72,15 @@ func _init() -> void:
 		if request["whole_project"]:
 			_check_project_settings()
 
-	var output := FileAccess.open(request["output"], FileAccess.WRITE)
-	output.store_string(JSON.stringify({
+	var output_path: String = request["output"]
+	var output: FileAccess = FileAccess.open(output_path, FileAccess.WRITE)
+	var _written: Variant = output.store_string(JSON.stringify({
 		"files_checked": scripts.size(),
 		"diagnostics": _diagnostics,
 		"warning_settings": _warning_settings(),
 	}))
 	output.close()
-	OS.kill(OS.get_process_id())
+	var _killed: Variant = OS.kill(OS.get_process_id())
 
 
 func _collect_files(target: String, scripts: Array[String], resources: Array[String]) -> void:
@@ -139,7 +91,7 @@ func _collect_files(target: String, scripts: Array[String], resources: Array[Str
 			resources.append(target)
 		return
 	for dir_name: String in DirAccess.get_directories_at(target):
-		var path := target.path_join(dir_name)
+		var path: String = target.path_join(dir_name)
 		if dir_name.begins_with(".") or (target == "res://" and dir_name in SKIPPED_ROOT_DIRS):
 			continue
 		# Like the editor, treat a folder with its own project.godot as another project.
@@ -166,19 +118,20 @@ func _warning_settings() -> Array[String]:
 
 func _load_scripts(scripts: Array[String]) -> Array[String]:
 	var unloadable: Array[String] = []
-	for path in scripts:
-		var script := load(path) as GDScript
+	for path: String in scripts:
+		var script: GDScript = load(path) as GDScript
 		if script == null or not script.can_instantiate():
 			unloadable.append(path)
 	return unloadable
 
 
 func _report_script_errors(entries: Array[Dictionary], unloadable: Array[String], report_warnings: bool) -> void:
-	var autoloads := _autoload_names()
-	var explained := {}
+	var autoloads: Dictionary = _autoload_names()
+	var explained: Dictionary = {}
 	for entry: Dictionary in entries:
 		var message: String = entry["message"]
 		var file: String = entry["file"]
+		var line: int = entry["line"]
 		explained[file] = true
 		# The failure this refers to is reported on the script that caused it.
 		if message.ends_with("Failed to compile depended scripts."):
@@ -187,21 +140,21 @@ func _report_script_errors(entries: Array[Dictionary], unloadable: Array[String]
 		# The analyzer, which runs first, has already checked their use.
 		if _is_missing_autoload_error(message, autoloads):
 			continue
-		var is_warning := message.ends_with(WARNING_SUFFIX)
+		var is_warning: bool = message.ends_with(WARNING_SUFFIX)
 		message = message.trim_prefix("Parse Error: ").trim_prefix("Compile Error: ").trim_suffix(WARNING_SUFFIX)
 		if not report_warnings:
 			# Warnings seen here are the ones the project itself set to "error".
-			_add(file, entry["line"], "error", "gdscript", message)
+			_add(file, line, "error", "gdscript", message)
 		elif not is_warning:
 			continue
 		elif UNSAFE_MARKER in message:
 			if _names_project_class(message):
-				_add(file, entry["line"], "warning", "unsafe-access", message)
+				_add(file, line, "warning", "unsafe-access", message)
 		else:
-			_add(file, entry["line"], "warning", "gdscript-warning", message)
+			_add(file, line, "warning", "gdscript-warning", message)
 	if report_warnings:
 		return
-	for path in unloadable:
+	for path: String in unloadable:
 		if not explained.has(path):
 			_add(path, 0, "error", "gdscript", "the script could not be loaded")
 
@@ -209,21 +162,21 @@ func _report_script_errors(entries: Array[Dictionary], unloadable: Array[String]
 # Calling something Node or Variant does not declare is everyday dynamic GDScript,
 # so it says little. On one of the project's own classes, it is usually a mistake.
 func _names_project_class(message: String) -> bool:
-	const PREFIX := "inferred type \""
-	var start := message.find(PREFIX)
+	const PREFIX: String = "inferred type \""
+	var start: int = message.find(PREFIX)
 	if start == -1:
 		return false
-	var type := message.substr(start + PREFIX.length()).get_slice("\"", 0)
+	var type: String = message.substr(start + PREFIX.length()).get_slice("\"", 0)
 	return type != "Variant" and not ClassDB.class_exists(type)
 
 
 func _is_missing_autoload_error(message: String, autoloads: Dictionary) -> bool:
-	const PREFIX := "Compile Error: Identifier not found: "
+	const PREFIX: String = "Compile Error: Identifier not found: "
 	return message.begins_with(PREFIX) and autoloads.has(message.trim_prefix(PREFIX).strip_edges())
 
 
 func _autoload_names() -> Dictionary:
-	var names := {}
+	var names: Dictionary = {}
 	for property: Dictionary in ProjectSettings.get_property_list():
 		var name: String = property["name"]
 		if name.begins_with("autoload/"):
@@ -234,14 +187,14 @@ func _autoload_names() -> Dictionary:
 # A load() of a literal path only fails when the line runs, so the compiler says
 # nothing about it.
 func _check_string_references(scripts: Array[String]) -> void:
-	var pattern := RegEx.create_from_string(
+	var pattern: RegEx = RegEx.create_from_string(
 		"\\b(?:load|change_scene_to_file|ResourceLoader\\.load)\\(\\s*\"(res://[^\"]+)\""
 	)
-	for path in scripts:
-		var lines := FileAccess.get_file_as_string(path).split("\n")
-		for index in lines.size():
-			var line := lines[index]
-			var comment := line.find("#")
+	for path: String in scripts:
+		var lines: PackedStringArray = FileAccess.get_file_as_string(path).split("\n")
+		for index: int in lines.size():
+			var line: String = lines[index]
+			var comment: int = line.find("#")
 			for found: RegExMatch in pattern.search_all(line):
 				if comment != -1 and comment < found.get_start():
 					continue
@@ -250,7 +203,7 @@ func _check_string_references(scripts: Array[String]) -> void:
 
 
 func _check_resources(resources: Array[String]) -> void:
-	for path in resources:
+	for path: String in resources:
 		for dependency: String in ResourceLoader.get_dependencies(path):
 			# Entries look like "uid://abc::Type::res://path" or just a path.
 			var target: String = dependency.get_slice("::", 2) if "::" in dependency else dependency
@@ -285,7 +238,7 @@ func _resource_exists(path: String) -> bool:
 
 func _add(file: String, line: int, severity: String, rule: String, message: String) -> void:
 	# Godot often explains one mistake twice on the same line.
-	var key := "%s:%d:%s" % [file, line, rule if rule != "missing-resource" else message]
+	var key: String = "%s:%d:%s" % [file, line, rule if rule != "missing-resource" else message]
 	if not _seen.has(key):
 		_seen[key] = true
 		_diagnostics.append({

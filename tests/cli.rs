@@ -12,6 +12,7 @@ use tempfile::TempDir;
 const PLAYER: &str = "class_name Player\nextends Node\n\nvar health: int = 10\n\n\nfunc hit(amount: int) -> void:\n\thealth -= amount\n";
 
 const EVERY_WARNING: &[&str] = &[
+    "confusable_temporary_modification",
     "unassigned_variable",
     "unassigned_variable_op_assign",
     "unused_variable",
