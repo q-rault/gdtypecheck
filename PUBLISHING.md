@@ -1,10 +1,10 @@
 # Publishing
 
-`gdtypecheck` releases are tag-driven. Pushing a `v<version>` tag starts **Publish release** (`.github/workflows/release.yml`), which checks that the tag matches the version in `Cargo.toml`, builds the archives, publishes to crates.io (trusted publishing, no token), then creates the GitHub release. Tags with a prerelease suffix (`v1.3.0-rc.1`) become GitHub prereleases and are not sent to gdsuite.
+A release is one run of **Cut release**, from the Actions tab. There is no local release command.
 
-The version source of truth is the committed repo state: `Cargo.toml`, `Cargo.lock` and the example output in `docs/content/docs/ci.mdx`. `scripts/release.py bump` updates the version and `cargo update --workspace` the lockfile.
+Cut release commits the new version and pushes a `v<version>` tag, which starts **Publish release** (`.github/workflows/release.yml`). Publish release checks that the tag matches the version in `Cargo.toml`, builds the archives, publishes to crates.io (trusted publishing, no token), then creates the GitHub release with the archives. Tags with a prerelease suffix (`v1.3.0-rc.1`) become GitHub prereleases and are not sent to gdsuite.
 
-## Release from GitHub
+## Releasing
 
 **Actions → Cut release → Run workflow**, on `main`:
 
@@ -15,7 +15,7 @@ The version source of truth is the committed repo state: `Cargo.toml`, `Cargo.lo
 | version | an exact version instead, such as `1.3.0-rc.1` (overrides the two above) |
 | dry run | pick the version and run the tests, push nothing |
 
-It bumps the version, runs `cargo test --locked` (the Godot tests skip there; CI runs them on main), commits `release: v<version>` to `main`, pushes the tag and starts Publish release and `docs.yml`. The run summary shows the version it picked.
+It updates `Cargo.toml`, `Cargo.lock` and the example output in `docs/content/docs/ci.mdx`, runs `cargo test --locked` (the Godot tests skip there; CI runs them on main), commits `release: v<version>` to `main`, pushes the tag and starts Publish release and the docs deploy (`docs.yml`). The run summary shows the version it picked.
 
 How the version is picked, from the current one:
 
@@ -30,29 +30,18 @@ How the version is picked, from the current one:
 | 1.3.0-rc.1 | minor | none | 1.3.0 |
 | 1.3.0-rc.1 | major | none | 2.0.0 |
 
-From a prerelease, a bump that already leads to its version stays on it, so keep the same `bump` through the betas, the release candidates and the release. Going back (from `rc` to `beta`) is refused. Check a pick without releasing with `python scripts/release.py next-version minor rc`.
+From a prerelease, a bump that already leads to its version stays on it, so keep the same `bump` through the betas, the release candidates and the release. Going back (from `rc` to `beta`) is refused. To see a pick without releasing, run Cut release with **dry run**, or `python scripts/release.py next-version minor rc`.
 
-## Release from a checkout
+## When a release fails
 
-From a clean `main` checkout:
+- **Publish release failed on a transient error** (runner or network): open the run and use **Re-run failed jobs**.
+- **It needs a fix, and crates.io does not have the version yet**: delete the tag (Code → Tags, or `git push origin --delete v<version>`) and the GitHub release if one was created, merge the fix to `main`, then run Cut release with **version** set to the same version. It tags `main` as it is, since the version is already there.
+- **crates.io already has the version**: it cannot be published again. Release the fix as the next patch.
 
-```sh
-just release 0.2.0
-just release 0.2.0-beta.1
-```
+## Automation set up once
 
-`just release` updates the version files, runs the tests, commits `release: v<version>`, tags it and pushes `main` and the tag.
+### Telling gdsuite: `GDSUITE_TRIGGER_TOKEN`
 
-## Failed release recovery
-
-If Publish release fails but the tag already points to the correct release commit, prefer fixing the workflow and re-running the job.
-
-If the fix requires a new commit and the original release did not publish to crates.io, move the same tag to the new commit instead of inventing a patch version. Pushing the moved tag starts Publish release again:
-
-```sh
-just retag-release 0.2.0
-```
-
-Once crates.io has a version, it cannot be published again: release the next patch instead.
+After a stable release, Publish release starts gdsuite's pin-tools workflow, which opens or updates gdsuite's PR pinning this release. That needs the `GDSUITE_TRIGGER_TOKEN` secret here; [gdsuite's RELEASING.md](https://github.com/q-rault/gdsuite/blob/main/RELEASING.md) says how to create it. Without it, the release still succeeds and warns that gdsuite was not told.
 
 The docs site is published from release and prerelease tags; see [docs/README.md](docs/README.md#published-versions).
