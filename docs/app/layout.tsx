@@ -1,0 +1,33 @@
+import { RootProvider } from 'fumadocs-ui/provider';
+import { Inter } from 'next/font/google';
+import type { ReactNode } from 'react';
+import './global.css';
+
+const inter = Inter({ subsets: ['latin'] });
+
+export const metadata = {
+  title: {
+    template: '%s | gdtypecheck',
+    default: 'gdtypecheck — Type-check a Godot project from the command line',
+  },
+  description: 'Report GDScript and shader compile errors and broken references in a Godot project',
+};
+
+export default function RootLayout({ children }: { children: ReactNode }) {
+  return (
+    <html lang="en" className={inter.className} suppressHydrationWarning>
+      <body className="flex min-h-screen flex-col">
+        <RootProvider
+          search={{
+            options: {
+              type: 'static',
+              api: `${process.env.NEXT_PUBLIC_BASE_PATH}/api/search.json`,
+            },
+          }}
+        >
+          {children}
+        </RootProvider>
+      </body>
+    </html>
+  );
+}

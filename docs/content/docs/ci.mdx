@@ -1,0 +1,56 @@
+---
+title: CI and Tools
+description: Exit codes, JSON output for tools and agents, and SARIF for GitHub code scanning.
+---
+
+## Exit codes
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | No problems (warnings don't count unless you pass `--warnings-as-errors`) |
+| `1` | Problems found |
+| `2` | The check could not run |
+
+## JSON
+
+```sh
+gdtypecheck --format json
+```
+
+```json
+{
+  "schema_version": 1,
+  "tool_version": "0.2.2",
+  "godot_version": "4.7.2.stable.official",
+  "ok": false,
+  "files_checked": 158,
+  "errors": 1,
+  "warnings": 0,
+  "duration_ms": 4210,
+  "diagnostics": [
+    {
+      "file": "player/player.gd",
+      "line": 42,
+      "severity": "error",
+      "rule": "gdscript",
+      "message": "Cannot return a value of type \"String\" as \"int\"."
+    }
+  ]
+}
+```
+
+When the check can't run, the JSON has `"ok": false` and a `tool_error`
+message instead of the counts, and the exit code is `2`.
+
+## GitHub code scanning
+
+```yaml
+- run: gdtypecheck --format sarif > gdtypecheck.sarif
+  continue-on-error: true
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: gdtypecheck.sarif
+```
+
+Godot must be installed in the job; set `GODOT_EXE` if it isn't on the `PATH`
+as `godot`.

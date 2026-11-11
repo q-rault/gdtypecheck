@@ -11,7 +11,11 @@ enemy.gd:17: warning[gdscript-warning]: The local variable "speed" is declared b
 gdtypecheck: 3 error(s), 1 warning(s) (158 scripts)
 ```
 
+Documentation: **[q-rault.github.io/gdtypecheck](https://q-rault.github.io/gdtypecheck/)**
+
 ## Install
+
+Download a binary from the [releases page](https://github.com/q-rault/gdtypecheck/releases), or:
 
 ```sh
 cargo install gdtypecheck
@@ -66,7 +70,7 @@ Addons, hidden folders, folders with a `.gdignore`, and nested projects are skip
 
 ## Part of gdsuite
 
-`gdtypecheck` works alone, and is also the typecheck step of [`gdsuite`](https://github.com/q-rault/gdsuite).
+`gdtypecheck` works alone, and is also the typecheck step of [`gdsuite`](https://github.com/q-rault/gdsuite) ([docs](https://q-rault.github.io/gdsuite/)).
 
 ## License
 
