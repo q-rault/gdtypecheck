@@ -1,0 +1,24 @@
+---
+title: CLI Reference
+description: Every gdtypecheck flag.
+---
+
+```sh
+gdtypecheck [OPTIONS] [TARGET]...
+```
+
+`TARGET`s are files or folders to check, relative to the project root; the
+default is the whole project.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--project-root <DIR>` | `.` | Godot project to check |
+| `--godot-exe <PATH>` | `$GODOT_EXE`, then `godot` | Godot 4.5+ executable |
+| `--format <FORMAT>` | `text` | `text`, `json`, or `sarif` (SARIF 2.1.0) |
+| `--strict` | off | Also report method and property accesses the compiler can't verify, such as a method that doesn't exist on one of your typed classes |
+| `--no-warnings` | off | Don't report warnings; about twice as fast |
+| `--warnings-as-errors` | off | Exit with `1` when there are warnings |
+| `--timeout <SECONDS>` | `300` | Time to wait for each Godot run |
+| `-V, --version` | | Print the version |
+
+Exit codes: `0` no problems, `1` problems found, `2` the check could not run.

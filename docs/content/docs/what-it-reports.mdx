@@ -1,0 +1,45 @@
+---
+title: What It Reports
+description: The rules gdtypecheck reports, what it can't see, and what it does to your project.
+---
+
+## Rules
+
+| Rule | What it finds | When |
+| --- | --- | --- |
+| `gdscript` | Parse and type errors, wrong arguments, unknown names and types, missing `preload`s | Always |
+| `shader` | Compile errors in `.gdshader` files and the files they include | Always |
+| `missing-resource` | Scenes and resources that reference missing files, broken autoloads and main scene, `load("res://...")` and `change_scene_to_file("res://...")` of missing files, missing shader includes | Always |
+| `gdscript-warning` | The warnings your project settings set to "warn" | Unless `--no-warnings` |
+| `unsafe-access` | Methods and properties that don't exist on one of your own classes | With `--strict` |
+
+Warnings don't fail the check unless you pass `--warnings-as-errors`.
+
+## How it works, and what it can't see
+
+It loads your scripts and shaders in a headless Godot and collects what
+Godot's own compilers report, so the analysis is Godot's and matches the
+editor. That has limits:
+
+- **Only typed code is checked.** `var p = Player.new()` is unchecked; `var p := Player.new()` is. A typed project gets more out of this tool.
+- **`--strict` covers your classes only.** A method missing from `Node` or `Variant` is usually normal dynamic GDScript, so those aren't reported. A property that only a subclass declares is reported, even though it can work at runtime.
+- **Literal paths only.** A `load()` of a path built at runtime isn't checked.
+- **Node paths aren't checked.** `$Missing` and `get_node("Missing")` are not compared with your scenes.
+- **Standalone shader files only.** Shader code embedded in a scene, and visual shaders, aren't checked.
+- **It finds errors, not bugs.** Whether the code does the right thing is what tests are for, see [gdtest](https://q-rault.github.io/gdtest/).
+
+## What it checks
+
+```sh
+gdtypecheck                     # the whole project
+gdtypecheck player/ ui/hud.gd   # only these files and folders
+```
+
+Addons, hidden folders, folders with a `.gdignore`, and nested projects are
+skipped unless you name them as targets or your code depends on them.
+
+## Effects on your project
+
+- Your code doesn't run: the check ends before Godot creates autoloads or scenes. The exception is **static variable initializers**, which run when a script loads.
+- When the class cache in `.godot/` is missing or out of date, it runs `godot --import`, as the editor would. This can create `.uid` files for new scripts.
+- Reporting warnings takes a second Godot run with a temporary `override.cfg` in the project root, which is the only way to change warning levels. It's restored afterwards, and if a run is killed, the next one cleans it up. `--no-warnings` skips it, which is about twice as fast, so avoid running two checks of one project at once without it.

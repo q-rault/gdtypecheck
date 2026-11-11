@@ -1,0 +1,13 @@
+{
+  "title": "gdtypecheck",
+  "pages": [
+    "index",
+    "---Getting Started---",
+    "installation",
+    "---Guides---",
+    "what-it-reports",
+    "ci",
+    "---Reference---",
+    "cli-reference"
+  ]
+}

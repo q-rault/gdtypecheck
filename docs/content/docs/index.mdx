@@ -1,0 +1,26 @@
+---
+title: gdtypecheck
+description: Report what is wrong with a Godot project without opening the editor or running the game.
+---
+
+gdtypecheck reports what is wrong with a Godot project without opening the
+editor or running the game: GDScript compile errors, including type errors,
+shader compile errors, and references to files that no longer exist. It is
+meant for CI and coding agents, which can't see the editor's error underlines.
+
+```console
+$ gdtypecheck
+player/player.gd:42: error[gdscript]: Cannot return a value of type "String" as "int".
+ui/hud.tscn: error[missing-resource]: references "res://ui/old_bar.gd", which does not exist
+levels/menu.gd:8: error[missing-resource]: "res://levels/gone.tscn" does not exist
+enemy.gd:17: warning[gdscript-warning]: The local variable "speed" is declared but never used in the block.
+gdtypecheck: 3 error(s), 1 warning(s) (158 scripts)
+```
+
+- [Installation](/docs/installation)
+- [What it reports](/docs/what-it-reports), and what it can't see
+- [CI and tools](/docs/ci): JSON, SARIF and exit codes
+- [CLI Reference](/docs/cli-reference)
+
+gdtypecheck works alone, and is also the typecheck step of
+[gdsuite](https://q-rault.github.io/gdsuite/).
