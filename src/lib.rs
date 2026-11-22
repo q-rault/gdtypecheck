@@ -88,6 +88,11 @@ struct Diagnostic {
     severity: Severity,
     rule: String,
     message: String,
+    /// What exactly Godot reported, within `rule`: the name of a GDScript
+    /// warning in kebab-case (`unused-variable`); `gdscript-error` or
+    /// `shader-error` for an error, as Godot names none; or `load-error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,13 +295,11 @@ fn print_text(report: &Report) {
             Severity::Error => "error",
             Severity::Warning => "warning",
         };
+        let code = d.code.as_deref().unwrap_or(&d.rule);
         if d.line > 0 {
-            println!(
-                "{}:{}: {severity}[{}]: {}",
-                d.file, d.line, d.rule, d.message
-            );
+            println!("{}:{}: {severity}[{code}]: {}", d.file, d.line, d.message);
         } else {
-            println!("{}: {severity}[{}]: {}", d.file, d.rule, d.message);
+            println!("{}: {severity}[{code}]: {}", d.file, d.message);
         }
     }
     let files = report.files_checked;

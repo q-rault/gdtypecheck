@@ -169,34 +169,37 @@ fn a_correct_project_passes() {
 #[test]
 fn compile_errors_are_reported_with_their_location() {
     let cases = [
-        ("extends Node\nfunc f(:\n", "bad.gd:2: error[gdscript]"),
+        (
+            "extends Node\nfunc f(:\n",
+            "bad.gd:2: error[gdscript-error]",
+        ),
         (
             "extends Node\nfunc f() -> void:\n\tvar x: int = \"text\"\n\tprint(x)\n",
-            "bad.gd:3: error[gdscript]",
+            "bad.gd:3: error[gdscript-error]",
         ),
         (
             "extends Node\nfunc f() -> int:\n\treturn \"text\"\n",
-            "bad.gd:3: error[gdscript]",
+            "bad.gd:3: error[gdscript-error]",
         ),
         (
             "extends Node\nfunc f() -> void:\n\tPlayer.new().hit(\"ten\")\n",
-            "bad.gd:3: error[gdscript]",
+            "bad.gd:3: error[gdscript-error]",
         ),
         (
             "extends Node\nfunc f() -> void:\n\tPlayer.new().hit()\n",
-            "bad.gd:3: error[gdscript]",
+            "bad.gd:3: error[gdscript-error]",
         ),
         (
             "extends Node\nvar p: NoSuchClass\n",
-            "bad.gd:2: error[gdscript]",
+            "bad.gd:2: error[gdscript-error]",
         ),
         (
             "extends Node\nfunc f() -> void:\n\tprint(undefined_name)\n",
-            "bad.gd:3: error[gdscript]",
+            "bad.gd:3: error[gdscript-error]",
         ),
         (
             "extends Node\nconst A = preload(\"res://nope.gd\")\n",
-            "bad.gd:2: error[gdscript]",
+            "bad.gd:2: error[gdscript-error]",
         ),
     ];
     for (source, expected) in cases {
@@ -219,7 +222,7 @@ fn an_error_is_reported_on_its_cause_not_on_every_dependent() {
         "extends Node\nconst D = preload(\"res://dep.gd\")\n",
     );
     let run = p.run(&[]);
-    assert_reports(&run, "dep.gd:4: error[gdscript]");
+    assert_reports(&run, "dep.gd:4: error[gdscript-error]");
     assert!(!run.stdout.contains("Failed to compile"), "{}", run.stdout);
 }
 
@@ -292,8 +295,8 @@ fn shader_errors_are_reported_with_their_location() {
     p.write("uses.gdshader", "shader_type canvas_item;\n#include \"res://bad.gdshaderinc\"\nvoid fragment() { COLOR = vec4(helper()); }\n");
     p.write("gone.gdshader", "shader_type canvas_item;\n#include \"res://gone.gdshaderinc\"\nvoid fragment() { COLOR = vec4(1.0); }\n");
     let run = p.run(&[]);
-    assert_reports(&run, "bad.gdshader:4: error[shader]");
-    assert_reports(&run, "bad.gdshaderinc:1: error[shader]");
+    assert_reports(&run, "bad.gdshader:4: error[shader-error]");
+    assert_reports(&run, "bad.gdshaderinc:1: error[shader-error]");
     assert_reports(&run, "gone.gdshader:2: error[missing-resource]");
     assert!(!run.stdout.contains("Unknown character"), "{}", run.stdout);
 }
@@ -310,7 +313,7 @@ fn a_shader_error_is_reported_once_when_a_script_preloads_it() {
         "extends Node\nconst S = preload(\"res://bad.gdshader\")\n",
     );
     let run = p.run(&[]);
-    assert_reports(&run, "bad.gdshader:2: error[shader]");
+    assert_reports(&run, "bad.gdshader:2: error[shader-error]");
     assert_eq!(run.stdout.matches("error[").count(), 1, "{}", run.stdout);
 }
 
@@ -340,7 +343,7 @@ fn autoloads_are_understood_but_never_run() {
         "misuse.gd",
         "extends Node\nfunc f() -> String:\n\treturn Boot.value()\n",
     );
-    assert_reports(&p.run(&[]), "misuse.gd:3: error[gdscript]");
+    assert_reports(&p.run(&[]), "misuse.gd:3: error[gdscript-error]");
 }
 
 #[test]
@@ -379,7 +382,7 @@ fn warnings_are_shown_without_failing_by_default() {
     let run = p.run(&[]);
     assert_eq!(run.code, 0, "{}", run.stdout);
     assert!(
-        run.stdout.contains("warn.gd:3: warning[gdscript-warning]"),
+        run.stdout.contains("warn.gd:3: warning[unused-variable]"),
         "{}",
         run.stdout
     );
@@ -396,7 +399,10 @@ fn warnings_the_project_made_errors_fail_the_check() {
         "warn.gd",
         "extends Node\nfunc f() -> void:\n\tvar unused := 1\n",
     );
-    assert_reports(&p.run(&["--no-warnings"]), "warn.gd:3: error[gdscript]");
+    assert_reports(
+        &p.run(&["--no-warnings"]),
+        "warn.gd:3: error[unused-variable]",
+    );
 }
 
 /// Project settings apply to the checker script too, so it has to compile under the
@@ -414,7 +420,7 @@ fn the_strictest_project_settings_do_not_break_the_check() {
         .collect();
     p.append_settings(&format!("[debug]\n{settings}"));
     let run = p.run(&[]);
-    assert_reports(&run, "warn.gd:3: error[gdscript]");
+    assert_reports(&run, "warn.gd:3: error[inferred-declaration]");
     assert!(!run.stdout.contains("checker"), "{}", run.stdout);
 }
 
@@ -468,6 +474,7 @@ fn json_output_is_structured() {
     assert_eq!(diagnostic["line"], 3);
     assert_eq!(diagnostic["severity"], "error");
     assert_eq!(diagnostic["rule"], "gdscript");
+    assert_eq!(diagnostic["code"], "gdscript-error");
 }
 
 #[test]

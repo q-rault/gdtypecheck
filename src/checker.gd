@@ -22,6 +22,61 @@ const LEVEL_WARN: int = 1
 const SKIPPED_ROOT_DIRS: Array[String] = ["addons"]
 const RESOURCE_EXTENSIONS: Array[String] = ["tscn", "tres", "scn", "res"]
 const UNSAFE_MARKER: String = "may be present on a subtype"
+# Godot's warning messages, with the name of the warning each one comes from
+# (debug/gdscript/warnings/<name>), in kebab-case. Godot reports a warning by its
+# message only, so this is how a finding gets its code. Taken from Godot 4.7; a
+# message from another version that matches none is reported without a code.
+const WARNING_MESSAGES: Array[Array] = [
+	["unassigned-variable", "The variable \"%s\" is used before being assigned a value."],
+	["unassigned-variable-op-assign", "The variable \"%s\" is modified with the compound-assignment operator \"%s=\" but was not previously initialized."],
+	["unused-variable", "The local variable \"%s\" is declared but never used in the block. If this is intended, prefix it with an underscore: \"_%s\"."],
+	["unused-local-constant", "The local constant \"%s\" is declared but never used in the block. If this is intended, prefix it with an underscore: \"_%s\"."],
+	["unused-private-class-variable", "The class variable \"%s\" is declared but never used in the class."],
+	["unused-parameter", "The parameter \"%s\" is never used in the function \"%s()\". If this is intended, prefix it with an underscore: \"_%s\"."],
+	["unused-signal", "The signal \"%s\" is declared but never explicitly used in the class."],
+	["shadowed-variable", "The local %s \"%s\" is shadowing an already-declared %s at line %s in the current class."],
+	["shadowed-variable-base-class", "The local %s \"%s\" is shadowing an already-declared %s at line %s in the base class \"%s\"."],
+	["shadowed-variable-base-class", "The local %s \"%s\" is shadowing an already-declared %s in the base class \"%s\"."],
+	["shadowed-global-identifier", "The %s \"%s\" has the same name as a %s."],
+	["unreachable-code", "Unreachable code (statement after return) in function \"%s()\"."],
+	["unreachable-pattern", "Unreachable pattern (pattern after wildcard or bind)."],
+	["standalone-expression", "Standalone expression (the line may have no effect)."],
+	["standalone-ternary", "Standalone ternary operator (the return value is being discarded)."],
+	["incompatible-ternary", "Values of the ternary operator are not mutually compatible."],
+	["untyped-declaration", "%s \"%s()\" has no static return type."],
+	["untyped-declaration", "%s \"%s\" has no static type."],
+	["inferred-declaration", "%s \"%s\" has an implicitly inferred static type."],
+	["unsafe-property-access", "The property \"%s\" is not present on the inferred type \"%s\" (but may be present on a subtype)."],
+	["unsafe-method-access", "The method \"%s()\" is not present on the inferred type \"%s\" (but may be present on a subtype)."],
+	["unsafe-cast", "Casting \"Variant\" to \"%s\" is unsafe."],
+	["unsafe-call-argument", "The argument %s of the %s \"%s()\" requires the subtype \"%s\" but the supertype \"%s\" was provided."],
+	["unsafe-void-return", "The method \"%s()\" returns \"void\" but it's trying to return a call to \"%s()\" that can't be ensured to also be \"void\"."],
+	["return-value-discarded", "The function \"%s()\" returns a value that will be discarded if not used."],
+	["static-called-on-instance", "The function \"%s()\" is a static function but was called from an instance. Instead, it should be directly called from the type: \"%s.%s()\"."],
+	["missing-tool", "The base class script has the \"@tool\" annotation, but this script does not have it."],
+	["redundant-static-unload", "The \"@static_unload\" annotation is redundant because the file does not have a class with static variables."],
+	["redundant-await", "\"await\" keyword is unnecessary because the expression isn't a coroutine nor a signal."],
+	["missing-await", "\"await\" keyword might be desired because the expression is a coroutine."],
+	["assert-always-true", "Assert statement is redundant because the expression is always true."],
+	["assert-always-false", "Assert statement will raise an error because the expression is always false."],
+	["integer-division", "Integer division. Decimal part will be discarded."],
+	["narrowing-conversion", "Narrowing conversion (float is converted to int and loses precision)."],
+	["int-as-enum-without-cast", "Integer used when an enum value is expected. If this is intended, cast the integer to the enum type using the \"as\" keyword."],
+	["int-as-enum-without-match", "Cannot %s %s as Enum \"%s\": no enum member has matching value."],
+	["enum-variable-without-default", "The variable \"%s\" has an enum type and does not set an explicit default value. The default will be set to \"0\"."],
+	["empty-file", "Empty script file."],
+	["deprecated-keyword", "The \"%s\" keyword is deprecated and will be removed in a future release. Please replace it with \"%s\"."],
+	["confusable-identifier", "The identifier \"%s\" has misleading characters and might be confused with something else."],
+	["confusable-local-declaration", "The %s \"%s\" is declared below in the parent block."],
+	["confusable-local-usage", "The identifier \"%s\" will be shadowed below in the block."],
+	["confusable-capture-reassignment", "Reassigning lambda capture does not modify the outer local variable \"%s\"."],
+	["confusable-temporary-modification", "The built-in property \"%s\" will not be modified as a result of calling the method \"%s()\". Consider assigning the desired value to the property instead, or check the \"%s\" class for a specialized API."],
+	["confusable-temporary-modification", "The built-in property \"%s\" will not be modified in the assignment chain. Consider using a temporary variable and assigning it back instead, or check the \"%s\" class for a specialized API."],
+	["inference-on-variant", "The %s type is being inferred from a Variant value, so it will be typed as Variant."],
+	["native-method-override", "The method \"%s()\" overrides a method from native class \"%s\". This won't be called by the engine and may not work as expected."],
+	["get-node-default-without-onready", "The default value uses \"%s\" which won't return nodes in the scene tree before \"_ready()\" is called. Use the \"@onready\" annotation to solve this."],
+	["onready-with-export", "\"@onready\" will set the default value after \"@export\" takes effect and will override it."],
+]
 
 
 class ErrorCollector extends Logger:
@@ -51,6 +106,8 @@ class ErrorCollector extends Logger:
 
 
 var _diagnostics: Array[Dictionary] = []
+# [code, RegEx] for each of WARNING_MESSAGES, built when first needed.
+var _warning_patterns: Array[Array] = []
 var _seen: Dictionary = {}
 
 
@@ -136,7 +193,7 @@ func _check_shaders(shaders: Array[String], collector: ErrorCollector) -> void:
 			continue
 		var shader: Shader = load(path) as Shader
 		if shader == null:
-			_add(path, 0, "error", "shader", "the shader could not be loaded")
+			_add(path, 0, "error", "shader", "the shader could not be loaded", "shader-error")
 			continue
 		var _uniforms: Variant = shader.get_shader_uniform_list()
 		for entry: Dictionary in collector.entries:
@@ -144,7 +201,7 @@ func _check_shaders(shaders: Array[String], collector: ErrorCollector) -> void:
 				var file: String = entry["file"]
 				var line: int = entry["line"]
 				var message: String = entry["message"]
-				_add(file if file != "" else path, line, "error", "shader", message)
+				_add(file if file != "" else path, line, "error", "shader", message, "shader-error")
 		collector.entries.clear()
 
 
@@ -193,21 +250,26 @@ func _report_script_errors(entries: Array[Dictionary], unloadable: Array[String]
 			continue
 		var is_warning: bool = message.ends_with(WARNING_SUFFIX)
 		message = message.trim_prefix("Parse Error: ").trim_prefix("Compile Error: ").trim_suffix(WARNING_SUFFIX)
+		var code: String = _warning_code(message) if is_warning else ""
 		if not report_warnings:
 			# Warnings seen here are the ones the project itself set to "error".
-			_add(file, line, "error", "gdscript", message)
+			# Godot gives its errors no names, and calls type errors "Parse Error"
+			# too, so they all get one code.
+			if not is_warning:
+				code = "gdscript-error"
+			_add(file, line, "error", "gdscript", message, code)
 		elif not is_warning:
 			continue
 		elif UNSAFE_MARKER in message:
 			if _names_project_class(message):
 				_add(file, line, "warning", "unsafe-access", message)
 		else:
-			_add(file, line, "warning", "gdscript-warning", message)
+			_add(file, line, "warning", "gdscript-warning", message, code)
 	if report_warnings:
 		return
 	for path: String in unloadable:
 		if not explained.has(path):
-			_add(path, 0, "error", "gdscript", "the script could not be loaded")
+			_add(path, 0, "error", "gdscript", "the script could not be loaded", "load-error")
 
 
 # Calling something Node or Variant does not declare is everyday dynamic GDScript,
@@ -287,11 +349,39 @@ func _resource_exists(path: String) -> bool:
 	return FileAccess.file_exists(path) or ResourceLoader.exists(path)
 
 
-func _add(file: String, line: int, severity: String, rule: String, message: String) -> void:
+func _add(file: String, line: int, severity: String, rule: String, message: String, code: String = "") -> void:
 	# Godot often explains one mistake twice on the same line.
 	var key: String = "%s:%d:%s" % [file, line, rule if rule != "missing-resource" else message]
 	if not _seen.has(key):
 		_seen[key] = true
-		_diagnostics.append({
+		var diagnostic: Dictionary = {
 			"file": file, "line": line, "severity": severity, "rule": rule, "message": message,
-		})
+		}
+		if code != "":
+			diagnostic["code"] = code
+		_diagnostics.append(diagnostic)
+
+
+# The name of the Godot warning `message` comes from, or "" when it is unknown.
+func _warning_code(message: String) -> String:
+	if _warning_patterns.is_empty():
+		for pair: Array in WARNING_MESSAGES:
+			var code: String = pair[0]
+			var template: String = pair[1]
+			_warning_patterns.append([code, RegEx.create_from_string(_pattern(template))])
+	for pair: Array in _warning_patterns:
+		var code: String = pair[0]
+		var regex: RegEx = pair[1]
+		if regex.search(message) != null:
+			return code
+	return ""
+
+
+# A regular expression matching a message made from `template`, whose "%s" can
+# be anything.
+func _pattern(template: String) -> String:
+	var escaped: String = ""
+	for index: int in template.length():
+		var character: String = template[index]
+		escaped += "\\" + character if character in "\\^$.|?*+()[]{}" else character
+	return "^" + escaped.replace("%s", ".*?") + "$"
