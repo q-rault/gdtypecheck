@@ -4,10 +4,10 @@ Reports what is wrong with a Godot project without opening the editor or running
 
 ```console
 $ gdtypecheck
-player/player.gd:42: error[gdscript]: Cannot return a value of type "String" as "int".
+player/player.gd:42: error[gdscript-error]: Cannot return a value of type "String" as "int".
 ui/hud.tscn: error[missing-resource]: references "res://ui/old_bar.gd", which does not exist
 levels/menu.gd:8: error[missing-resource]: "res://levels/gone.tscn" does not exist
-enemy.gd:17: warning[gdscript-warning]: The local variable "speed" is declared but never used in the block.
+enemy.gd:17: warning[unused-variable]: The local variable "speed" is declared but never used in the block.
 gdtypecheck: 3 error(s), 1 warning(s) (158 scripts)
 ```
 
@@ -48,6 +48,12 @@ gdtypecheck --format sarif      # for GitHub code scanning
 | `missing-resource` | Scenes and resources that reference missing files, broken autoloads and main scene, `load("res://...")` and `change_scene_to_file("res://...")` of missing files, missing shader includes | Always |
 | `gdscript-warning` | The warnings your project settings set to "warn" | Unless `--no-warnings` |
 | `unsafe-access` | Methods and properties that don't exist on one of your own classes | With `--strict` |
+
+Each finding also has a **code**, printed in the brackets and given as `code`
+in JSON: the name of the Godot warning, in kebab-case (`unused-variable` is
+`UNUSED_VARIABLE` in Project Settings → Debug → GDScript), or
+`gdscript-error` and `shader-error` for errors, which Godot doesn't name.
+`missing-resource` and `unsafe-access` findings print their rule.
 
 ## How it works, and what it can't see
 

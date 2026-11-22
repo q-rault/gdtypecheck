@@ -13,6 +13,12 @@ description: The rules gdtypecheck reports, what it can't see, and what it does 
 | `gdscript-warning` | The warnings your project settings set to "warn" | Unless `--no-warnings` |
 | `unsafe-access` | Methods and properties that don't exist on one of your own classes | With `--strict` |
 
+Each finding also has a **code**, printed in the brackets and given as `code`
+in JSON: the name of the Godot warning, in kebab-case (`unused-variable` is
+`UNUSED_VARIABLE` in Project Settings → Debug → GDScript), or
+`gdscript-error` and `shader-error` for errors, which Godot doesn't name.
+`missing-resource` and `unsafe-access` findings print their rule.
+
 Warnings don't fail the check unless you pass `--warnings-as-errors`.
 
 ## How it works, and what it can't see
@@ -23,6 +29,7 @@ editor. That has limits:
 
 - **Only typed code is checked.** `var p = Player.new()` is unchecked; `var p := Player.new()` is. A typed project gets more out of this tool.
 - **`--strict` covers your classes only.** A method missing from `Node` or `Variant` is usually normal dynamic GDScript, so those aren't reported. A property that only a subclass declares is reported, even though it can work at runtime.
+- **One syntax error per script.** Outside the editor, Godot reports only the first syntax error of a script; the editor also lists the errors that follow from it. Type errors are all reported.
 - **Literal paths only.** A `load()` of a path built at runtime isn't checked.
 - **Node paths aren't checked.** `$Missing` and `get_node("Missing")` are not compared with your scenes.
 - **Standalone shader files only.** Shader code embedded in a scene, and visual shaders, aren't checked.
