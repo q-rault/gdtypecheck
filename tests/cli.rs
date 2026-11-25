@@ -4,7 +4,9 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
+    thread,
+    time::Duration,
 };
 
 use tempfile::TempDir;
@@ -560,6 +562,40 @@ fn the_project_is_left_as_it_was() {
         fs::read_to_string(p.root.join("override.cfg")).unwrap(),
         mine
     );
+}
+
+/// The game or its tests may start while the check runs: warnings turned into
+/// errors in a file would break their scripts.
+#[test]
+fn the_check_never_writes_settings_other_processes_read() {
+    let p = project!();
+    p.write(
+        "warn.gd",
+        "extends Node
+func f() -> void:
+	var unused := 1
+",
+    );
+    let mut check = Command::new(env!("CARGO_BIN_EXE_gdtypecheck"))
+        .current_dir(&p.root)
+        .arg("--warnings-as-errors")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let settings = fs::read_to_string(p.root.join("project.godot")).unwrap();
+    let status = loop {
+        assert!(!p.exists("override.cfg"), "the check wrote override.cfg");
+        assert_eq!(
+            fs::read_to_string(p.root.join("project.godot")).unwrap(),
+            settings
+        );
+        if let Some(status) = check.try_wait().unwrap() {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(status.code(), Some(1), "the warning was not reported");
 }
 
 #[test]

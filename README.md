@@ -70,7 +70,7 @@ It loads your scripts and shaders in a headless Godot and collects what Godot's 
 
 - Your code doesn't run: the check ends before Godot creates autoloads or scenes. The exception is **static variable initializers**, which run when a script loads.
 - When the class cache in `.godot/` is missing or out of date, it runs `godot --import`, as the editor would. This can create `.uid` files for new scripts.
-- Reporting warnings takes a second Godot run with a temporary `override.cfg` in the project root, which is the only way to change warning levels. It's restored afterwards, and if a run is killed, the next one cleans it up. `--no-warnings` skips it, which is about twice as fast, so avoid running two checks of one project at once without it.
+- Reporting warnings takes a second Godot run. `--no-warnings` skips it, which is about twice as fast. Your project's settings are not changed: you can run the game, its tests or another check meanwhile.
 
 Addons, hidden folders, folders with a `.gdignore`, and nested projects are skipped unless you name them as targets or your code depends on them.
 
