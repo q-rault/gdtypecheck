@@ -24,12 +24,11 @@ const SCHEMA_VERSION: u32 = 1;
 const EXIT_PROBLEMS: u8 = 1;
 const EXIT_TOOL_FAILURE: u8 = 2;
 const MINIMUM_GODOT: (u32, u32) = (4, 5);
-/// Marks an override.cfg, or the part of one, that this tool wrote, so that one
-/// left behind by a killed run is cleaned up by the next.
+/// Marks an override.cfg, or the part of one, that versions up to 0.2.5 wrote.
 const OVERRIDE_MARKER: &str = "; gdtypecheck temporary settings, safe to delete";
 const UNSAFE_ACCESS_SETTINGS: [&str; 2] = [
-    "gdscript/warnings/unsafe_method_access",
-    "gdscript/warnings/unsafe_property_access",
+    "debug/gdscript/warnings/unsafe_method_access",
+    "debug/gdscript/warnings/unsafe_property_access",
 ];
 
 #[derive(Debug, Parser)]
@@ -155,16 +154,14 @@ fn check(cli: &Cli) -> Result<bool> {
 
     let workspace = Workspace::create()?;
     let whole_project = targets == ["res://"];
-    let first = workspace.run_pass(&godot, &root, &targets, whole_project, "errors", timeout)?;
+    let first = workspace.run_pass(&godot, &root, &targets, whole_project, &[], timeout)?;
     let mut diagnostics = first.diagnostics;
 
     if cli.strict || !cli.no_warnings {
         let mut settings = first.warning_settings;
         settings.extend(UNSAFE_ACCESS_SETTINGS.map(String::from));
-        let override_file = OverrideFile::write(&root, &settings)?;
-        let second = workspace.run_pass(&godot, &root, &targets, false, "warnings", timeout);
-        override_file.restore()?;
-        let warnings = select_warnings(second?.diagnostics, cli);
+        let second = workspace.run_pass(&godot, &root, &targets, false, &settings, timeout)?;
+        let warnings = select_warnings(second.diagnostics, cli);
         // What the project already treats as an error shows up in both passes.
         let is_new = |warning: &Diagnostic| {
             !diagnostics
@@ -541,21 +538,29 @@ impl Workspace {
         Ok(Self { dir, checker })
     }
 
+    /// One Godot run. Without `warnings`, it reports errors; with them, what
+    /// Godot reports once these warning settings are errors.
     fn run_pass(
         &self,
         godot: &Path,
         root: &Path,
         targets: &[String],
         whole_project: bool,
-        pass: &str,
+        warnings: &[String],
         timeout: Duration,
     ) -> Result<PassResult> {
+        let pass = if warnings.is_empty() {
+            "errors"
+        } else {
+            "warnings"
+        };
         let result_path = self.dir.join(format!("{pass}.json"));
         let log_path = self.dir.join(format!("{pass}.log"));
         let request_path = self.dir.join(format!("{pass}.request.json"));
         let request = serde_json::json!({
             "targets": targets,
             "pass": pass,
+            "warnings": warnings,
             "whole_project": whole_project,
             "output": slash_path(&result_path),
         });
@@ -600,54 +605,8 @@ fn slash_path(path: &Path) -> String {
     path.display().to_string().replace('\\', "/")
 }
 
-/// A temporary override.cfg, the only way to change warning levels before Godot
-/// reads them. Restored on drop so that an error cannot leave it behind.
-struct OverrideFile {
-    path: PathBuf,
-    original: Option<String>,
-    restored: bool,
-}
-
-impl OverrideFile {
-    fn write(root: &Path, warning_settings: &[String]) -> Result<Self> {
-        let path = root.join("override.cfg");
-        let original = fs::read_to_string(&path).ok();
-        let mut contents = original.clone().unwrap_or_default();
-        contents.push_str(&format!("\n{OVERRIDE_MARKER}\n[debug]\n"));
-        for setting in warning_settings {
-            contents.push_str(&format!("{setting}=2\n"));
-        }
-        fs::write(&path, contents)
-            .with_context(|| format!("failed to write {}", path.display()))?;
-        Ok(Self {
-            path,
-            original,
-            restored: false,
-        })
-    }
-
-    fn restore(mut self) -> Result<()> {
-        self.restored = true;
-        self.put_back()
-    }
-
-    fn put_back(&self) -> Result<()> {
-        match &self.original {
-            Some(original) => fs::write(&self.path, original)?,
-            None => fs::remove_file(&self.path)?,
-        }
-        Ok(())
-    }
-}
-
-impl Drop for OverrideFile {
-    fn drop(&mut self) {
-        if !self.restored {
-            let _ = self.put_back();
-        }
-    }
-}
-
+/// Versions up to 0.2.5 wrote an override.cfg in the project while they ran, and
+/// left it there when they were killed.
 fn remove_leftover_override(root: &Path) -> Result<()> {
     let path = root.join("override.cfg");
     let Ok(contents) = fs::read_to_string(&path) else {

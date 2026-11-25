@@ -19,6 +19,7 @@ extends SceneTree
 const WARNINGS_PREFIX: String = "debug/gdscript/warnings/"
 const WARNING_SUFFIX: String = " (Warning treated as error.)"
 const LEVEL_WARN: int = 1
+const LEVEL_ERROR: int = 2
 const SKIPPED_ROOT_DIRS: Array[String] = ["addons"]
 const RESOURCE_EXTENSIONS: Array[String] = ["tscn", "tres", "scn", "res"]
 const UNSAFE_MARKER: String = "may be present on a subtype"
@@ -122,6 +123,9 @@ func _init() -> void:
 		_collect_files(target, scripts, resources, shaders)
 
 	var report_warnings: bool = request["pass"] == "warnings"
+	if report_warnings:
+		var warnings: Array = request["warnings"]
+		_turn_into_errors(warnings)
 
 	var collector: ErrorCollector = ErrorCollector.new()
 	OS.add_logger(collector)
@@ -170,9 +174,20 @@ func _collect_files(target: String, scripts: Array[String], resources: Array[Str
 		_collect_files(target.path_join(file_name), scripts, resources, shaders)
 
 
-# The warnings set to "warn". Godot only reports warnings outside the editor when
-# they are errors, and only reads these settings at startup, so the CLI promotes
-# them through a temporary override.cfg and runs a second pass.
+# Makes Godot report the warnings of `settings`, which it only does outside the
+# editor when they are errors. This changes them for this process alone: nothing
+# is saved, as other Godot processes, such as the game or its tests, may start
+# meanwhile and must not see it. Scripts already compiled keep their warnings to
+# themselves, hence a second pass.
+func _turn_into_errors(settings: Array) -> void:
+	for setting: String in settings:
+		ProjectSettings.set_setting(setting, LEVEL_ERROR)
+	# Godot 4.6 and newer read the levels at startup and on this signal, which
+	# would come too late: at the end of the frame.
+	ProjectSettings.settings_changed.emit()
+
+
+# The warnings set to "warn", which the second pass turns into errors.
 func _warning_settings() -> Array[String]:
 	var settings: Array[String] = []
 	for property: Dictionary in ProjectSettings.get_property_list():
@@ -180,7 +195,7 @@ func _warning_settings() -> Array[String]:
 		if name.begins_with(WARNINGS_PREFIX):
 			var value: Variant = ProjectSettings.get_setting(name)
 			if value is int and value == LEVEL_WARN:
-				settings.append(name.trim_prefix("debug/"))
+				settings.append(name)
 	return settings
 
 
