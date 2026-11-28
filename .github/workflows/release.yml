@@ -12,92 +12,13 @@ on:
 permissions:
   contents: write
 
+# No binary archives: gdsuite builds gdtypecheck in from crates.io, and anyone
+# else installs it with `cargo install`.
 jobs:
-  build:
-    name: Build ${{ matrix.target }}
-    # Run by hand, it must be on a release tag, not a branch.
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-            archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
-          # Cross-compiled on Apple Silicon: Intel runners are scarce and
-          # made every release wait for them.
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      # No musl-tools: the dependencies are pure Rust, which Rust's own musl
-      # target links without musl-gcc, so the build does not hang on apt.
-
-      - name: Cache cargo registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-cargo-
-
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --locked
-
-      - name: Package (Unix)
-        if: matrix.archive == 'tar.gz'
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF_NAME}"
-          PACKAGE_DIR="gdtypecheck-${VERSION}-${{ matrix.target }}"
-          ARCHIVE="${PACKAGE_DIR}.tar.gz"
-          rm -rf "${PACKAGE_DIR}"
-          mkdir -p "${PACKAGE_DIR}"
-          cp "target/${{ matrix.target }}/release/gdtypecheck" "${PACKAGE_DIR}/"
-          cp README.md LICENSE-MIT LICENSE-APACHE LICENSE.md "${PACKAGE_DIR}/"
-          tar czf "${ARCHIVE}" "${PACKAGE_DIR}"
-          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
-
-      - name: Package (Windows)
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          $Version = $env:GITHUB_REF_NAME
-          $PackageDir = "gdtypecheck-$Version-${{ matrix.target }}"
-          $Archive = "$PackageDir.zip"
-          Remove-Item -Recurse -Force $PackageDir -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path $PackageDir | Out-Null
-          Copy-Item "target\${{ matrix.target }}\release\gdtypecheck.exe" "$PackageDir\"
-          Copy-Item "README.md","LICENSE-MIT","LICENSE-APACHE","LICENSE.md" $PackageDir
-          Compress-Archive -Path $PackageDir -DestinationPath $Archive
-          "ARCHIVE=$Archive" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: gdtypecheck-${{ matrix.target }}
-          path: ${{ env.ARCHIVE }}
-
   publish:
     name: Publish to crates.io
-    needs: build
+    # Run by hand, it must be on a release tag, not a branch.
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -106,9 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
+      # The runner's own Rust: publishing only checks that the crate builds.
       - name: Check the tag matches the crate version
         shell: bash
         run: |
@@ -118,38 +37,51 @@ jobs:
             exit 1
           fi
 
+      # Run again after a failure, Publish release skips what crates.io
+      # already has, so it can still finish the GitHub release.
+      - name: Find the crates left to publish
+        id: left
+        shell: bash
+        run: |
+          left=""
+          for crate in gdtypecheck; do
+            version=$(cargo metadata --no-deps --format-version 1 --locked | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
+            if curl -fsS "https://index.crates.io/${crate:0:2}/${crate:2:2}/${crate}" 2>/dev/null | grep -q "\"vers\":\"${version}\""; then
+              echo "${crate} ${version} is already on crates.io"
+            else
+              left="${left} -p ${crate}"
+            fi
+          done
+          echo "args=${left}" >> "$GITHUB_OUTPUT"
+
       - name: Get a crates.io token
+        if: steps.left.outputs.args != ''
         uses: rust-lang/crates-io-auth-action@v1
         id: auth
 
       - name: Publish
-        run: cargo publish --locked
+        if: steps.left.outputs.args != ''
+        run: cargo publish --locked ${{ steps.left.outputs.args }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   release:
     name: Create GitHub release
-    needs: [build, publish]
+    needs: publish
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v7
-        with:
-          path: artifacts
-          merge-multiple: true
-
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
           generate_release_notes: true
           # v1.0.0-rc.1 and the like are prereleases: never marked "Latest".
           prerelease: ${{ contains(github.ref_name, '-') }}
 
   notify-gdsuite:
     name: Ask gdsuite to pin this release
-    needs: release
+    # gdsuite builds the tools from crates.io: it needs only the published crate.
+    needs: publish
     # gdsuite pins stable releases only.
     if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest

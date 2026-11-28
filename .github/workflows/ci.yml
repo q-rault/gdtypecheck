@@ -11,6 +11,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Line numbers in panics without the rest of the debug info: faster builds,
+# smaller caches.
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
 jobs:
   # fmt and clippy run once, here, for all three release OSes: clippy only
   # type-checks, so it lints the Windows and macOS code (cfg(windows) and the
@@ -49,7 +54,9 @@ jobs:
             godot: '4.5.1'
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      # The runner's own Rust, not the latest stable: updating it costs 5-20s
+      # (mostly on Windows), and the tests do not need clippy's newest lints,
+      # which the lint job checks.
       # Restores the closest older cache when Cargo.lock changes, and saves a
       # fresh one from main only (PR caches are not visible to other PRs).
       - uses: Swatinem/rust-cache@v2

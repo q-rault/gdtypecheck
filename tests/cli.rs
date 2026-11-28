@@ -168,48 +168,77 @@ fn a_correct_project_passes() {
     assert_clean(&p.run(&[]));
 }
 
+/// One test per case, so that the cases run in parallel: run one after another,
+/// they made the slowest test by far.
+fn compile_error_is_reported_at(source: &str, expected: &str) {
+    let p = project!();
+    p.write("player.gd", PLAYER);
+    p.write("bad.gd", source);
+    assert_reports(&p.run(&[]), expected);
+}
+
 #[test]
-fn compile_errors_are_reported_with_their_location() {
-    let cases = [
-        (
-            "extends Node\nfunc f(:\n",
-            "bad.gd:2: error[gdscript-error]",
-        ),
-        (
-            "extends Node\nfunc f() -> void:\n\tvar x: int = \"text\"\n\tprint(x)\n",
-            "bad.gd:3: error[gdscript-error]",
-        ),
-        (
-            "extends Node\nfunc f() -> int:\n\treturn \"text\"\n",
-            "bad.gd:3: error[gdscript-error]",
-        ),
-        (
-            "extends Node\nfunc f() -> void:\n\tPlayer.new().hit(\"ten\")\n",
-            "bad.gd:3: error[gdscript-error]",
-        ),
-        (
-            "extends Node\nfunc f() -> void:\n\tPlayer.new().hit()\n",
-            "bad.gd:3: error[gdscript-error]",
-        ),
-        (
-            "extends Node\nvar p: NoSuchClass\n",
-            "bad.gd:2: error[gdscript-error]",
-        ),
-        (
-            "extends Node\nfunc f() -> void:\n\tprint(undefined_name)\n",
-            "bad.gd:3: error[gdscript-error]",
-        ),
-        (
-            "extends Node\nconst A = preload(\"res://nope.gd\")\n",
-            "bad.gd:2: error[gdscript-error]",
-        ),
-    ];
-    for (source, expected) in cases {
-        let p = project!();
-        p.write("player.gd", PLAYER);
-        p.write("bad.gd", source);
-        assert_reports(&p.run(&[]), expected);
-    }
+fn compile_errors_are_reported_with_their_location_for_a_syntax_error() {
+    compile_error_is_reported_at(
+        "extends Node\nfunc f(:\n",
+        "bad.gd:2: error[gdscript-error]",
+    );
+}
+
+#[test]
+fn compile_errors_are_reported_with_their_location_for_a_wrong_variable_type() {
+    compile_error_is_reported_at(
+        "extends Node\nfunc f() -> void:\n\tvar x: int = \"text\"\n\tprint(x)\n",
+        "bad.gd:3: error[gdscript-error]",
+    );
+}
+
+#[test]
+fn compile_errors_are_reported_with_their_location_for_a_wrong_return_type() {
+    compile_error_is_reported_at(
+        "extends Node\nfunc f() -> int:\n\treturn \"text\"\n",
+        "bad.gd:3: error[gdscript-error]",
+    );
+}
+
+#[test]
+fn compile_errors_are_reported_with_their_location_for_a_wrong_argument_type() {
+    compile_error_is_reported_at(
+        "extends Node\nfunc f() -> void:\n\tPlayer.new().hit(\"ten\")\n",
+        "bad.gd:3: error[gdscript-error]",
+    );
+}
+
+#[test]
+fn compile_errors_are_reported_with_their_location_for_a_missing_argument() {
+    compile_error_is_reported_at(
+        "extends Node\nfunc f() -> void:\n\tPlayer.new().hit()\n",
+        "bad.gd:3: error[gdscript-error]",
+    );
+}
+
+#[test]
+fn compile_errors_are_reported_with_their_location_for_an_unknown_class() {
+    compile_error_is_reported_at(
+        "extends Node\nvar p: NoSuchClass\n",
+        "bad.gd:2: error[gdscript-error]",
+    );
+}
+
+#[test]
+fn compile_errors_are_reported_with_their_location_for_an_undefined_name() {
+    compile_error_is_reported_at(
+        "extends Node\nfunc f() -> void:\n\tprint(undefined_name)\n",
+        "bad.gd:3: error[gdscript-error]",
+    );
+}
+
+#[test]
+fn compile_errors_are_reported_with_their_location_for_a_missing_preload() {
+    compile_error_is_reported_at(
+        "extends Node\nconst A = preload(\"res://nope.gd\")\n",
+        "bad.gd:2: error[gdscript-error]",
+    );
 }
 
 #[test]

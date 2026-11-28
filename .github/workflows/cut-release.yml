@@ -85,8 +85,41 @@ jobs:
           python3 scripts/release.py check-version-sync
           git diff --stat
 
+      # main's CI has usually tested this commit already, and the bump only
+      # changes version numbers: the tests run here only when it has not.
+      - name: Look for a passing CI run
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          # A release commit only bumps versions, and its push started no CI:
+          # the commit before it counts.
+          if git log -1 --format=%s | grep -q '^release: v'; then
+            sha=$(git rev-parse HEAD^)
+          fi
+          for attempt in $(seq 1 45); do
+            runs=$(gh run list --workflow ci.yml --commit "$sha" --limit 20 --json status,conclusion)
+            if jq -e 'any(.[]; .conclusion == "success")' <<<"$runs" >/dev/null; then
+              echo "CI passed on ${sha}: not running the tests again"
+              echo "passed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if ! jq -e 'any(.[]; .status != "completed")' <<<"$runs" >/dev/null; then
+              break
+            fi
+            echo "CI is still running on ${sha}: waiting"
+            sleep 20
+          done
+          echo "No passing CI run on ${sha}: running the tests here"
+
       - name: Test
+        if: steps.ci.outputs.passed != 'true'
         run: cargo test --locked
+
+      - name: Build
+        if: steps.ci.outputs.passed == 'true'
+        run: cargo check --all-targets --locked
 
       - name: Commit, tag and push
         if: ${{ !inputs.dry_run }}
