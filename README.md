@@ -15,7 +15,7 @@ Documentation: **[q-rault.github.io/gdtypecheck](https://q-rault.github.io/gdtyp
 
 ## Install
 
-Download a binary from the [releases page](https://github.com/q-rault/gdtypecheck/releases), or:
+Install [gdsuite](https://q-rault.github.io/gdsuite/), which includes gdtypecheck, or:
 
 ```sh
 cargo install gdtypecheck

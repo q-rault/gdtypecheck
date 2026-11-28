@@ -2,7 +2,7 @@
 
 A release is one run of **Cut release**, from the Actions tab. There is no local release command.
 
-Cut release commits the new version and pushes a `v<version>` tag, which starts **Publish release** (`.github/workflows/release.yml`). Publish release checks that the tag matches the version in `Cargo.toml`, builds the archives, publishes to crates.io (trusted publishing, no token), then creates the GitHub release with the archives. Tags with a prerelease suffix (`v1.3.0-rc.1`) become GitHub prereleases and are not sent to gdsuite.
+Cut release commits the new version and pushes a `v<version>` tag, which starts **Publish release** (`.github/workflows/release.yml`). Publish release checks that the tag matches the version in `Cargo.toml`, publishes to crates.io (trusted publishing, no token; run again, it skips what crates.io already has), then creates the GitHub release, which has no binary archives: gdsuite builds gdtypecheck in from crates.io. Tags with a prerelease suffix (`v1.3.0-rc.1`) become GitHub prereleases and are not sent to gdsuite.
 
 ## Releasing
 
@@ -15,7 +15,7 @@ Cut release commits the new version and pushes a `v<version>` tag, which starts 
 | version | an exact version instead, such as `1.3.0-rc.1` (overrides the two above) |
 | dry run | pick the version and run the tests, push nothing |
 
-It updates `Cargo.toml`, `Cargo.lock` and the example output in `docs/content/docs/ci.mdx`, runs `cargo test --locked` (the Godot tests skip there; CI runs them on main), commits `release: v<version>` to `main`, pushes the tag and starts Publish release and the docs deploy (`docs.yml`). The run summary shows the version it picked.
+It updates `Cargo.toml`, `Cargo.lock` and the example output in `docs/content/docs/ci.mdx`, runs the tests (only `cargo check` when main's CI already passed on that commit), commits `release: v<version>` to `main`, pushes the tag and starts Publish release and the docs deploy (`docs.yml`). The run summary shows the version it picked.
 
 How the version is picked, from the current one:
 
